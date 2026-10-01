@@ -198,20 +198,36 @@ const SITES = collectSites();
 
 describe('#5048 git spawn sites are enumerated', () => {
   test('the scan finds the shipped read-only surfaces', () => {
-    // Guards the guard: a near-empty scan would make every other assertion
-    // here vacuously true, which is the failure mode a source-scan guard has.
+    // Guards the guard: a near-empty scan would make every other assertion here
+    // vacuously true, which is the failure mode a source-scan guard has.
+    //
+    // Asserted structurally, not by filename. An earlier draft pinned six
+    // paths, and upstream's #5139 gate-modules refactor moved two of those git
+    // calls out of src/check-command-router.cts and turned this into a red
+    // build for a refactor that had nothing to do with the lock. What has to
+    // stay true is that git is spawned across several modules, that both named
+    // owners are found, and that the index-refreshing class is populated.
     assert.ok(SITES.length >= 8, `only found ${SITES.length} git spawn sites`);
-    const files = new Set(SITES.map((s) => s.file));
-    for (const expected of [
-      'src/shell-command-projection.cts',
-      'src/smart-entry.cts',
-      'src/check-command-router.cts',
-      'src/pristine-baseline.cts',
-      'src/phase.cts',
-      'hooks/gsd-statusline.js',
-    ]) {
-      assert.ok(files.has(expected), `scan missed ${expected}`);
-    }
+    assert.ok(
+      new Set(SITES.map((s) => s.file)).size >= 4,
+      'git is expected to be spawned from more than one module',
+    );
+
+    const execGitDef = HELPERS.global.get('execGit');
+    assert.ok(execGitDef, 'the shared execGit seam was not found');
+    assert.match(
+      path.relative(REPO_ROOT, execGitDef.file),
+      /^src[\\/]/,
+      'execGit must live under src/',
+    );
+
+    const statusline = SITES.filter((s) => s.file === 'hooks/gsd-statusline.js');
+    assert.ok(statusline.length >= 1, 'the statusline git spawn was not found');
+
+    assert.ok(
+      SITES.some((s) => s.subcommand === 'status' && s.refreshes),
+      'no index-refreshing `git status` site found; the scan is probably broken',
+    );
   });
 
   test('every index-free exemption carries a checkable reason', () => {
