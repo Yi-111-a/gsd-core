@@ -280,6 +280,81 @@ describe('#5048 every index-refreshing read-only spawn inherits GIT_OPTIONAL_LOC
   });
 });
 
+describe('#5048 a real repo proves the optional lock is not taken', () => {
+  // The assertions above are about the env we pass. This one is about git: it
+  // builds a real repo whose index is deliberately stale (a tracked file's stat
+  // data no longer matches what the index recorded) and shows that the two
+  // environments differ in what they do to .git/index.
+  //
+  // Staleness without a content change is the exact case that matters: git
+  // re-reads the file, finds it identical, and writes the refreshed stat data
+  // back — which is the write the optional lock exists to protect.
+
+  const { execFileSync: realExecFileSync } = require('node:child_process');
+  const crypto = require('node:crypto');
+  const os = require('node:os');
+
+  function digestIndex(dir) {
+    const indexPath = path.join(dir, '.git', 'index');
+    return crypto.createHash('sha256').update(fs.readFileSync(indexPath)).digest('hex');
+  }
+
+  /** A repo with one commit whose index is stale by stat data alone. */
+  function staleIndexRepo() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5048-'));
+    const git = (...args) => realExecFileSync('git', args, { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] });
+    git('init', '-q');
+    git('config', 'user.email', 'gsd@example.test');
+    git('config', 'user.name', 'gsd test');
+    fs.writeFileSync(path.join(dir, 'tracked.txt'), 'same bytes\n');
+    git('add', 'tracked.txt');
+    git('commit', '-q', '-m', 'initial');
+    // Stat-only staleness: identical content, newer mtime/size metadata.
+    const future = new Date(Date.now() + 5000);
+    fs.utimesSync(path.join(dir, 'tracked.txt'), future, future);
+    return dir;
+  }
+
+  test('with GIT_OPTIONAL_LOCKS=0, git status leaves .git/index byte-identical', () => {
+    const dir = staleIndexRepo();
+    try {
+      const before = digestIndex(dir);
+      realExecFileSync('git', ['status', '--porcelain'], {
+        cwd: dir,
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      assert.equal(
+        digestIndex(dir), before,
+        'a read-only git status must not rewrite the index',
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('without it, the same command does rewrite the index', () => {
+    // The control. Without this, the test above would pass even if git had
+    // stopped refreshing the index altogether, and would be asserting nothing.
+    const dir = staleIndexRepo();
+    try {
+      const before = digestIndex(dir);
+      realExecFileSync('git', ['status', '--porcelain'], {
+        cwd: dir,
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: '1' },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      assert.notEqual(
+        digestIndex(dir), before,
+        'expected git to refresh the index without the variable; if this fails '
+        + 'the premise of the sibling test changed and it needs revisiting',
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('#5048 the two env builders agree', () => {
   // The review's Major: the statusline builds its own `readOnlyGitEnv` while
   // execGit carries an inline literal. Two surfaces, one concept — asserted to
