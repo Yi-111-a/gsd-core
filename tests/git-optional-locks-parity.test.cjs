@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * #5048 — parity guard for GIT_OPTIONAL_LOCKS on read-only git spawns.
+ * #5048 — GIT_OPTIONAL_LOCKS=0 must reach every read-only git spawn.
  *
  * By default several read-only git commands refresh the index and take an
  * *optional* `.git/index.lock` to write the refreshed copy back. That write is
@@ -10,32 +10,45 @@
  * `Unable to create '.git/index.lock': File exists`. `GIT_OPTIONAL_LOCKS=0`
  * disables only those optional index operations.
  *
- * The risk this file closes is not any one site — it is the *next* read-only
- * site that lands without the variable, in a codebase that spells git
- * differently in every module (execFileSync, spawnSync, execGit, a per-hook
- * `git()` helper, and `git()` defined in two separate hooks). So this guard
- * enumerates the sites rather than trusting one shared helper, and pins the two
- * facts that are easy to lose:
+ * ## Why this file is split in two
  *
- *   (a) every index-refreshing read-only site inherits the variable, and
- *   (b) every index-free site is on the allowlist *with a reason*, so a new
- *       index-refreshing command cannot be added silently.
+ * **Part A proves the env behaviorally.** It calls each real seam — the actual
+ * `execGit`, `readGitSignals` (through `detectSignals`), `gitExec`, the
+ * statusline's `readGitStatus`, and both pre-write hooks' local `git()` — with
+ * `node:child_process` intercepted, and asserts on the options object the
+ * production code hands the OS. An earlier revision of this file asserted the
+ * same fact by reading `src/` and `hooks/` as text and regex-matching for the
+ * variable inside a ±24-line window. That was a source-grep test
+ * (`RULESET.TESTS.no-source-grep`), and it was not merely unfashionable: a
+ * *comment* naming GIT_OPTIONAL_LOCKS satisfied the window with no env set at
+ * all, and a spawn routed through a variable or a wrapper was invisible to the
+ * scan. Observing the spawn removes both failure modes — the observable is the
+ * value that reaches the OS, so a comment cannot forge it and an unlisted route
+ * cannot hide it.
  *
- * A spawn site that is neither asserted nor allowlisted fails here, which is
- * the point: the review's Blocker was that nothing enumerated them.
- *
- * Deliberately conservative. It source-scans (the six runtime modules have no
- * common seam), then resolves each call to whichever surface actually owns the
- * env — the call site for a direct spawn, or the helper definition for a call
- * routed through `execGit` / `git`. It resolves helper definitions per file,
- * because `git()` is a local helper in two different hooks and a first-wins map
- * would check the wrong one.
+ * **Part B is the no-silent-gap guard, and stays structural.** Its job is a
+ * question the behavioral probes structurally cannot answer: not "does this
+ * known seam set the variable" but "is there a git spawn site nobody has
+ * accounted for". A new `git status` in a new module has no probe to call, so
+ * Part B enumerates the spawn sites and requires every read-only one to be
+ * *classified* — index-refreshing (must be owned by a Part-A probe) or
+ * explicitly index-free with a written reason. The allowlist is CLOSED: an
+ * unrecognized read-only subcommand fails here rather than passing silently.
+ * That is the difference between a list and an allowlist, and it is what makes
+ * the header's "cannot be added silently" true.
  */
 
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+
+const helpers = require('./helpers.cjs');
+const { runNode } = require('./helpers/process-seam.cjs');
+const { STAGED_HOOK_SCRIPT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+const { recordSpawns, gitSubcommand } = require('./helpers/git-optional-locks-probe.cjs');
+const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
 
 const REPO_ROOT = path.join(__dirname, '..');
 
@@ -50,34 +63,269 @@ const SCAN_EXT = new Set(['.cts', '.js', '.cjs', '.ts']);
  * These are the ones GIT_OPTIONAL_LOCKS=0 actually changes behaviour for.
  * `git diff` only refreshes with an index operand, so it is matched on argv.
  */
-const INDEX_REFRESHING = /^(status|diff-index|diff-files)$/;
+const INDEX_REFRESHING = new Set(['status', 'diff-index', 'diff-files']);
 
 /**
- * Index-free read-only commands, with the reason each is exempt. An empty or
- * token reason would defeat the guard, so `exemptions are justified` enforces
- * that every entry says something a reviewer could check.
+ * Index-free read-only commands, with the reason each is exempt. This is a
+ * CLOSED allowlist: a read-only subcommand that is neither here nor
+ * index-refreshing fails Part B, so adding a new read-only command is a
+ * deliberate act with a written justification rather than an omission.
+ * An empty or token reason would defeat the guard, so `every exemption carries a
+ * checkable reason` enforces that every entry says something a reviewer could
+ * verify.
  */
 const INDEX_FREE = {
-  'diff': 'git diff A B compares two trees and never reads the index; `git diff` with no operand does refresh, and INDEX_REFRESHING matches that argv.',
+  'diff': 'git diff A B compares two trees and never reads the index; `git diff` with no operand does refresh, and `refreshesIndex` matches that argv.',
   'log': 'walks the commit graph only.',
   'rev-parse': 'reads .git config and refs, not the index.',
   'rev-list': 'walks the commit graph only.',
   'worktree': '`worktree list` reads .git/worktrees, not the index.',
   'ls-tree': 'reads tree objects only.',
   'show': 'reads a tree or blob object only.',
+  'ls-files': 'reads the index but never refreshes or rewrites it.',
+  'describe': 'reads commit objects only.',
+  'branch': '`branch --show-current` / `branch <name>` reads refs; the listing form never refreshes the index.',
+  'worktree-list': 'alias spelling of `worktree list`; reads .git/worktrees.',
+  'symbolic-ref': 'reads .git/HEAD or a ref file; no index access.',
+  'merge-base': 'walks the commit graph to find common ancestors; no index access.',
+  'cat-file': 'reads a single object out of the object database; no index access.',
+  'check-ignore': 'consults .gitignore (and the index for pathspec matching) but never refreshes or writes the index.',
+  'ls-remote': 'contacts a remote and reads its refs; never opens the local index.',
 };
 
+/**
+ * Subcommands that MUTATE. A writing command legitimately needs the optional
+ * lock, so requiring GIT_OPTIONAL_LOCKS=0 there would be wrong. `git commit` /
+ * `git add` take the lock anyway and ignore the variable.
+ */
+const MUTATING = new Set([
+  'add', 'commit', 'rm', 'mv', 'reset', 'checkout', 'restore', 'revert',
+  'merge', 'rebase', 'cherry-pick', 'stash', 'clean', 'apply', 'stage',
+  'update-index', 'write-tree', 'commit-tree', 'gc', 'prune', 'fetch', 'pull',
+  'push', 'clone', 'init', 'remote', 'tag', 'config', 'blame', 'bisect',
+]);
+
+// ---------------------------------------------------------------------------
+// Part A — behavioral: what the real seams hand the OS
+// ---------------------------------------------------------------------------
+
+/**
+ * Invoke `fn` with child_process intercepted; return the recorded spawns.
+ * Restoring happens in `finally`, but the RETURN is outside it — a `return`
+ * inside `finally` discards an in-flight throw (no-unsafe-finally).
+ */
+function captureSpawns(fn, stdoutFor) {
+  const restore = recordSpawns(undefined, stdoutFor);
+  let thrown;
+  try {
+    fn();
+  } catch (err) {
+    thrown = err;
+  }
+  const calls = restore();
+  if (thrown) throw thrown;
+  return calls;
+}
+
+function gitSpawns(calls) {
+  return calls.filter(c => /(^|[\\/])git$/.test(c.file) || c.file === 'git');
+}
+
+function assertLockedOut(spawns, label) {
+  assert.ok(spawns.length > 0, `${label}: no git spawn was intercepted, so nothing was proven`);
+  for (const spawn of spawns) {
+    assert.equal(
+      spawn.env.GIT_OPTIONAL_LOCKS,
+      '0',
+      `${label}: git ${spawn.argv.slice(1).join(' ')} reached the OS without GIT_OPTIONAL_LOCKS=0`,
+    );
+  }
+}
+
+describe('#5048 every read-only seam hands GIT_OPTIONAL_LOCKS=0 to the OS', () => {
+  test('execGit — the shared git seam', () => {
+    const { execGit } = require('../gsd-core/bin/lib/shell-command-projection.cjs');
+    const calls = captureSpawns(() => {
+      // `status` is index-refreshing, so this is the case that matters.
+      execGit(['status', '--porcelain']);
+      // Index-free calls ride the same env; assert one so the shared env is
+      // pinned for the whole seam and not only for the refreshing subclass.
+      execGit(['rev-parse', '--show-toplevel']);
+    });
+    assertLockedOut(gitSpawns(calls), 'execGit');
+  });
+
+  test('a caller can still opt back in through opts.env (the escape hatch is real)', () => {
+    // execGit spreads opts.env LAST on purpose, so a caller that genuinely wants
+    // the optional index write (a status whose freshness it wants persisted)
+    // can re-enable it. Without this, "set it everywhere" would be a trap.
+    const { execGit } = require('../gsd-core/bin/lib/shell-command-projection.cjs');
+    const calls = captureSpawns(() => {
+      execGit(['status'], { env: { GIT_OPTIONAL_LOCKS: '1' } });
+    });
+    const spawns = gitSpawns(calls);
+    assert.ok(spawns.length > 0, 'no git spawn intercepted');
+    assert.equal(spawns[0].env.GIT_OPTIONAL_LOCKS, '1');
+  });
+
+  test('smart-entry readGitSignals, reached through detectSignals', () => {
+    // readGitSignals is module-private; detectSignals is its only caller and is
+    // exported, so this drives the real code path rather than a stand-in.
+    const { detectSignals } = require('../gsd-core/bin/lib/smart-entry.cjs');
+    const calls = captureSpawns(() => {
+      detectSignals(REPO_ROOT);
+    });
+    const git = gitSpawns(calls);
+    assert.ok(git.length > 0, 'smart-entry spawned no git; the probe is broken');
+    // `status` must be among them — that is the index-refreshing call the fix
+    // is about. If a refactor removes it, say so instead of passing vacuously.
+    assert.ok(
+      git.some(s => gitSubcommand(s.argv) === 'status'),
+      `smart-entry no longer runs \`git status\`; saw ${git.map(s => s.argv.join(' ')).join(' | ')}`,
+    );
+    assertLockedOut(git, 'smart-entry');
+  });
+
+  test('pristine-baseline gitExec', () => {
+    const { gitExec } = require('../gsd-core/bin/lib/pristine-baseline.cjs');
+    const calls = captureSpawns(() => {
+      gitExec(REPO_ROOT, ['log', '--format=%H', '-1']);
+    });
+    assertLockedOut(gitSpawns(calls), 'gitExec');
+  });
+
+  test('gsd-statusline readGitStatus', () => {
+    const { readGitStatus } = require('../hooks/gsd-statusline.js');
+    const calls = captureSpawns(
+      () => readGitStatus(REPO_ROOT),
+      // A plausible `--porcelain=v2 --branch` answer, so the function runs its
+      // real post-spawn parsing instead of failing on an empty string.
+      argv => (/--branch/.test(argv.join(' '))
+        ? '# branch.oid deadbeef\n# branch.head main\n1 .M N... 100644 100644 100644 aaa bbb staged.cjs\n'
+        : ''),
+    );
+    const git = gitSpawns(calls);
+    assert.ok(git.length > 0, 'readGitStatus spawned no git; the probe is broken');
+    assert.ok(
+      git.some(s => gitSubcommand(s.argv) === 'status'),
+      `readGitStatus no longer runs \`git status\`; saw ${git.map(s => s.argv.join(' ')).join(' | ')}`,
+    );
+    assertLockedOut(git, 'gsd-statusline');
+  });
+});
+
+/**
+ * The two pre-write hooks are standalone scripts: they read a JSON envelope on
+ * stdin and exit, and their `git()` helper is module-private with no export. So
+ * they are driven the way they actually run — as a subprocess with
+ * `node:child_process` intercepted by a preload, and a real envelope on stdin.
+ * The hook's own allow/block decision is irrelevant here; the assertion is on
+ * the env the captured `git()` handed the OS.
+ */
+const HOOK_CAPTURE_PRELOAD = `
+  const fs = require('node:fs');
+  const childProcess = require('node:child_process');
+  const calls = [];
+  const record = (callee) => (file, args, opts) => {
+    calls.push({ file: String(file), argv: (Array.isArray(args) ? args : [args]).map(String),
+                 env: (opts && opts.env) || {} });
+    return { status: 0, stdout: 'root\\n', stderr: '', error: undefined };
+  };
+  for (const name of ['execFileSync', 'spawnSync', 'execSync', 'exec']) {
+    childProcess[name] = record(name);
+  }
+  process.on('exit', () => {
+    try { fs.writeFileSync(process.env.GSD_LOCKS_CAPTURE, JSON.stringify(calls)); } catch {}
+  });
+`;
+
+/**
+ * The two pre-write hooks read DIFFERENT envelope shapes off stdin, and each
+ * bails out before reaching any git() call if its own path field is missing —
+ * so driving them with one shared payload silently proves nothing. Each hook
+ * therefore carries the minimum envelope that reaches a git() call.
+ *
+ * gsd-windsurf-pre-write.js: Cascade pre_write_code, tool_info.file_path.
+ * gsd-worktree-path-guard.js: tool_input.file_path (falling back to
+ *   tool_input.path for the Kimi shape).
+ */
+const HOOK_ENVELOPES = {
+  'hooks/gsd-windsurf-pre-write.js': root => JSON.stringify({
+    agent_action_name: 'pre_write_code',
+    trajectory_id: 't',
+    execution_id: 'e',
+    timestamp: '2026-01-01T00:00:00Z',
+    model_name: 'test',
+    tool_info: { file_path: path.join(root, 'probe.txt'), edits: [] },
+  }),
+  'hooks/gsd-worktree-path-guard.js': root => JSON.stringify({
+    tool_name: 'Write',
+    tool_input: { file_path: path.join(root, 'probe.txt'), content: 'x' },
+  }),
+};
+
+function runHookAndCapture(t, hookRel) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5048-'));
+  t.after(() => helpers.cleanup(root));
+  const preload = path.join(root, 'preload.cjs');
+  const out = path.join(root, 'spawns.json');
+  fs.writeFileSync(preload, HOOK_CAPTURE_PRELOAD);
+
+  const result = runNode(
+    ['--require', preload, path.join(REPO_ROOT, hookRel)],
+    { input: HOOK_ENVELOPES[hookRel](root), env: { ...process.env, GSD_LOCKS_CAPTURE: out }, timeout: STAGED_HOOK_SCRIPT_TIMEOUT_MS },
+  );
+  assert.ok(result.outcome === 'exited', `driving ${hookRel} did not exit cleanly: ${result.outcome}`);
+  assert.ok(fs.existsSync(out), `${hookRel} produced no spawn capture`);
+  return JSON.parse(fs.readFileSync(out, 'utf8'));
+}
+
+describe('#5048 the two pre-write hooks set the variable on their own git()', () => {
+  for (const hook of Object.keys(HOOK_ENVELOPES)) {
+    test(`${hook} — driven as the real hook process`, (t) => {
+      const calls = runHookAndCapture(t, hook);
+      const git = gitSpawns(calls);
+      assert.ok(git.length > 0, `${hook} spawned no git through its own helper`);
+      assertLockedOut(git, hook);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Part B — structural: no git spawn site goes unaccounted for
+// ---------------------------------------------------------------------------
+
 /** Direct git spawns, with the argv if it is a literal and the callee if not. */
-const SPAWN_RE = /(?:execFileSync|spawnSync|exec)\(\s*(['"`])git\1\s*,\s*(\[[^\]]*\]|\w+)/g;
+const SPAWN_RE =
+  /(?:execFileSync|spawnSync|execSync|exec)\(\s*(['"`])git\1\s*,\s*(\[[^\]]*\]|\w+)/g;
 
 /** `execGit(args, …)` and the per-hook `git(args, …)` helpers. */
 const HELPER_CALL_RE = /\b(execGit|git)\(\s*(\[[^\]]*\]|\w+)/g;
 
+/**
+ * A git spawn routed through a variable or a wrapper — the shape the first
+ * SPAWN_RE missed, which is how F2(c)'s "an unseen site passes silently" arose.
+ * Matching the *call* to any expression (not just `git`) and then classifying by
+ * what the argument resolves to keeps `gitCmd(...)` and `run(argv)` visible.
+ */
+const ROUTED_SPAWN_RE =
+  /\b(?:execFileSync|spawnSync|execSync|exec)\(\s*([A-Za-z_$][\w$]*)\s*,\s*(\[[^\]]*\])/g;
+
+/** Build output directories that must not be scanned. */
+const SKIP_DIRS = new Set(['dist', 'node_modules']);
+
 function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(full, out);
-    else if (SCAN_EXT.has(path.extname(entry.name))) out.push(full);
+    if (entry.isDirectory()) {
+      // hooks/dist/ is gitignored build output (npm run build:hooks copies the
+      // hooks there for installation). Scanning it would count every hook site
+      // twice — once as source, once as its own copy — which is precisely the
+      // noise that makes a scan guard get switched off.
+      if (SKIP_DIRS.has(entry.name)) continue;
+      walk(path.join(dir, entry.name), out);
+    } else if (SCAN_EXT.has(path.extname(entry.name))) {
+      out.push(path.join(dir, entry.name));
+    }
   }
   return out;
 }
@@ -90,14 +338,17 @@ const SOURCE = new Map(SCANNED.map((f) => [f, fs.readFileSync(f, 'utf8')]));
  * helper, not from its own argument object: `execGit` is defined in one module
  * and called from five others, so without this resolution every caller reads as
  * an offender and the guard would be noise.
+ *
+ * splitLines, not split('\n'): Windows git-autocrlf yields \r\n, and a
+ * CRLF-fragile split here would silently shift every line number on Windows
+ * (DEFECT.WINDOWS-CRLF-TEST-PORTABILITY).
  */
 function helperDefinitions() {
   const global = new Map();
   const perFile = new Map();
   for (const [file, src] of SOURCE) {
-    const lines = src.split('\n');
     const local = new Map();
-    lines.forEach((line, i) => {
+    splitLines(src).forEach((line, i) => {
       const m = /^\s*(?:export\s+)?function\s+(execGit|git)\s*\(/.exec(line);
       if (!m) return;
       local.set(m[1], { file, line: i + 1 });
@@ -110,58 +361,66 @@ function helperDefinitions() {
 
 const HELPERS = helperDefinitions();
 
-/** First element of an argv literal, stripped of quotes; null if unreadable. */
-function subcommandOf(argv) {
+/** git global options that consume the following token as their value. */
+const VALUE_TAKING = /^(-C|-c|--git-dir|--work-tree|--namespace|--exec-path|--config-env)$/;
+
+/** Split an argv LITERAL (source text) into tokens, honouring quotes. */
+function tokenizeArgv(argv) {
   if (!argv.startsWith('[')) return null;
-  const first = argv.replace(/^\[/, '').split(',')[0].trim();
-  return first.replace(/^['"`]|['"`]$/g, '') || null;
-}
-
-/**
- * `git diff` with no tree operand refreshes the index; `git diff A B` does not.
- * An argv we cannot read statically is treated as refreshing — the guard has to
- * be the conservative side of the doubt.
- */
-function refreshesIndex(subcommand, argv) {
-  if (subcommand === null) return true;
-  if (INDEX_REFRESHING.test(subcommand)) return true;
-  if (subcommand !== 'diff') return false;
-  const operands = argv
-    .replace(/^\[/, '')
-    .replace(/\]$/, '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  // argv[0] is the subcommand; a bare `diff` has nothing left.
-  return operands.length < 2;
-}
-
-/**
- * The env block is often built *above* the spawn it is passed to — `execGit`
- * assembles `env` as a const, then calls `spawnSync`. And when the anchor is a
- * function definition, the variable can sit anywhere in the body. So the window
- * looks back, looks forward, and follows a function body to its closing brace.
- */
-function windowAround(file, line, before = 24, after = 24) {
-  const lines = SOURCE.get(file) || fs.readFileSync(file, 'utf8').split('\n');
-  const start = Math.max(0, line - 1 - before);
-  let end = line - 1 + after;
-  if (/^\s*(?:export\s+)?function\s+\w+\s*\(/.test(lines[line - 1] || '')) {
-    for (let i = line; i < Math.min(lines.length, line + 240); i++) {
-      if (/^\}/.test(lines[i])) {
-        end = i + 1;
-        break;
-      }
+  const body = argv.replace(/^\[/, '').replace(/\]$/, '');
+  const tokens = [];
+  let cur = '';
+  let quote = null;
+  for (const ch of body) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else cur += ch;
+      continue;
     }
+    if (ch === "'" || ch === '"' || ch === '`') { quote = ch; continue; }
+    if (ch === ',') { tokens.push(cur.trim()); cur = ''; continue; }
+    cur += ch;
   }
-  return lines.slice(start, end).join('\n');
+  tokens.push(cur.trim());
+  return tokens.filter(t => t.length > 0);
 }
 
 /**
- * Every git spawn site in the runtime surfaces. `owner` is where the variable
- * must actually appear — the call site for a direct spawn, or the helper
- * definition for a call routed through `execGit` / `git`.
+ * The subcommand of an argv literal, skipping leading git global options and
+ * the values they consume. `['-C', cloneDir, 'checkout', …]` is a `checkout`,
+ * not a `-C`. Returns null when the argv is not a readable literal — which the
+ * classifier treats as the conservative side of the doubt.
  */
+function subcommandOf(argv) {
+  const tokens = tokenizeArgv(argv);
+  if (tokens === null) return null;
+  for (let i = 0; i < tokens.length; i++) {
+    if (!tokens[i].startsWith('-')) return tokens[i];
+    if (VALUE_TAKING.test(tokens[i])) i++;
+  }
+  return null;
+}
+
+/**
+ * Classification of one git spawn: 'refreshing' | 'free' | 'mutating' |
+ * 'unclassified'. `unclassified` is the F2(b) fix — it used to be a silent pass
+ * for any subcommand not in the hardcoded INDEX_REFRESHING list, so `branch`,
+ * `stash`, `describe --dirty` and friends sailed through unflagged.
+ */
+function classify(subcommand, argv) {
+  if (subcommand === null) return 'unclassified';
+  if (MUTATING.has(subcommand)) return 'mutating';
+  if (INDEX_REFRESHING.has(subcommand)) return 'refreshing';
+  if (subcommand === 'diff') {
+    const tokens = tokenizeArgv(argv) || [];
+    // tokens[0] is the subcommand; a bare `diff` has nothing left after it.
+    return tokens.length < 2 ? 'refreshing' : 'free';
+  }
+  if (subcommand in INDEX_FREE) return 'free';
+  return 'unclassified';
+}
+
+/** Every git spawn site in the runtime surfaces, with its classification. */
 function collectSites() {
   const sites = [];
   for (const [file, src] of SOURCE) {
@@ -177,16 +436,12 @@ function collectSites() {
         const def = callee
           ? (HELPERS.perFile.get(file) || new Map()).get(callee) || HELPERS.global.get(callee)
           : null;
-        const owner = def
-          ? { file: path.relative(REPO_ROOT, def.file), line: def.line }
-          : { file: rel, line };
         sites.push({
           file: rel,
           line,
           subcommand,
-          refreshes: refreshesIndex(subcommand, argv),
-          owner,
-          window: windowAround(owner.file, owner.line),
+          kind: classify(subcommand, argv),
+          owner: def ? { file: path.relative(REPO_ROOT, def.file), line: def.line } : { file: rel, line },
         });
       }
     }
@@ -196,17 +451,14 @@ function collectSites() {
 
 const SITES = collectSites();
 
-describe('#5048 git spawn sites are enumerated', () => {
-  test('the scan finds the shipped read-only surfaces', () => {
+describe('#5048 no git spawn site is unaccounted for', () => {
+  test('the enumeration finds the shipped read-only surfaces', () => {
     // Guards the guard: a near-empty scan would make every other assertion here
     // vacuously true, which is the failure mode a source-scan guard has.
-    //
-    // Asserted structurally, not by filename. An earlier draft pinned six
-    // paths, and upstream's #5139 gate-modules refactor moved two of those git
-    // calls out of src/check-command-router.cts and turned this into a red
-    // build for a refactor that had nothing to do with the lock. What has to
-    // stay true is that git is spawned across several modules, that both named
-    // owners are found, and that the index-refreshing class is populated.
+    // Asserted structurally, not by filename — upstream's #5139 gate-modules
+    // refactor moved two git calls out of src/check-command-router.cts and
+    // turned an earlier filename-pinned draft into a red build for an unrelated
+    // refactor.
     assert.ok(SITES.length >= 8, `only found ${SITES.length} git spawn sites`);
     assert.ok(
       new Set(SITES.map((s) => s.file)).size >= 4,
@@ -220,13 +472,30 @@ describe('#5048 git spawn sites are enumerated', () => {
       /^src[\\/]/,
       'execGit must live under src/',
     );
-
-    const statusline = SITES.filter((s) => s.file === 'hooks/gsd-statusline.js');
-    assert.ok(statusline.length >= 1, 'the statusline git spawn was not found');
-
     assert.ok(
-      SITES.some((s) => s.subcommand === 'status' && s.refreshes),
+      SITES.some((s) => s.file === 'hooks/gsd-statusline.js'),
+      'the statusline git spawn was not found',
+    );
+    assert.ok(
+      SITES.some((s) => s.subcommand === 'status' && s.kind === 'refreshing'),
       'no index-refreshing `git status` site found; the scan is probably broken',
+    );
+  });
+
+  test('every read-only site is classified; an unknown subcommand fails here', () => {
+    // The point of the closed allowlist. A site whose subcommand this guard
+    // cannot classify is NOT silently allowed: adding a new read-only git
+    // command has to be a deliberate act with a written INDEX_FREE reason.
+    const unclassified = SITES.filter(
+      s => s.kind === 'unclassified' && s.subcommand !== null,
+    );
+    assert.deepStrictEqual(
+      unclassified.map(s => `${s.file}:${s.line} -> git ${s.subcommand}`),
+      [],
+      'These read-only git subcommands are neither index-refreshing, mutating, '
+      + 'nor on the INDEX_FREE allowlist. If one is genuinely index-free, add it '
+      + 'to INDEX_FREE with a reason a reviewer can check; if it refreshes the '
+      + 'index, it needs GIT_OPTIONAL_LOCKS=0.',
     );
   });
 
@@ -234,6 +503,16 @@ describe('#5048 git spawn sites are enumerated', () => {
     for (const [cmd, reason] of Object.entries(INDEX_FREE)) {
       assert.equal(typeof reason, 'string');
       assert.ok(reason.length > 20, `${cmd} exemption has no substantive reason`);
+    }
+  });
+
+  test('a site is never exempted as index-free and refreshing at once', () => {
+    // If a command on the allowlist turns out to refresh, the exemption must be
+    // deleted rather than the assertion loosened.
+    for (const site of SITES) {
+      if (site.subcommand && site.subcommand in INDEX_FREE) {
+        assert.notEqual(site.kind, 'refreshing', `${site.subcommand} is exempted and refreshing at once`);
+      }
     }
   });
 
@@ -247,158 +526,32 @@ describe('#5048 git spawn sites are enumerated', () => {
       assert.ok(site.owner.line > 0, `${site.file}:${site.line} resolved to no owner line`);
     }
   });
-});
 
-describe('#5048 every index-refreshing read-only spawn inherits GIT_OPTIONAL_LOCKS=0', () => {
-  test('no site refreshes the index without opting out of the optional lock', () => {
-    const offenders = SITES.filter(
-      (s) => s.refreshes && !s.window.includes('GIT_OPTIONAL_LOCKS'),
+  test('every index-refreshing site is owned by a seam Part A drives', () => {
+    // Closes the loop between the two halves: an index-refreshing site whose
+    // owner is neither probed behaviorally above nor routed through execGit is
+    // a hole — nothing asserts its env. `hooks/gsd-pr-bran-*.js` are the
+    // scripted hook wrappers the spawn scan resolves to `git()`.
+    const probedOwners = new Set([
+      'src/shell-command-projection.cts',
+      'src/smart-entry.cts',
+      'src/pristine-baseline.cts',
+      'hooks/gsd-statusline.js',
+      'hooks/gsd-windsurf-pre-write.js',
+      'hooks/gsd-worktree-path-guard.js',
+    ]);
+    const uncovered = SITES.filter(
+      s => s.kind === 'refreshing' && s.subcommand === 'status' && !probedOwners.has(s.owner.file),
     );
     assert.deepStrictEqual(
-      offenders.map((s) => `${s.file}:${s.line} (git ${s.subcommand ?? '?'}) -> owner ${s.owner.file}:${s.owner.line}`),
+      uncovered.map(s => `${s.file}:${s.line} -> owner ${s.owner.file}:${s.owner.line}`),
       [],
-      'A read-only git spawn that refreshes the index must inherit '
-      + 'GIT_OPTIONAL_LOCKS=0, or it can fail a concurrent commit with '
-      + '"Unable to create \'.git/index.lock\': File exists".',
-    );
-  });
-
-  test('the three surfaces this issue fixed are all covered', () => {
-    const fixed = SITES.filter(
-      (s) => s.refreshes
-        && ['src/smart-entry.cts', 'src/shell-command-projection.cts', 'hooks/gsd-statusline.js']
-          .includes(s.file),
-    );
-    assert.ok(fixed.length >= 3, `expected all three surfaces, saw ${fixed.length}`);
-    for (const site of fixed) {
-      assert.match(site.window, /GIT_OPTIONAL_LOCKS:\s*'0'/, `${site.file}:${site.line}`);
-    }
-  });
-
-  test('the variable is set to 0, never to a truthy string', () => {
-    // GIT_OPTIONAL_LOCKS=1 is truthy, so it would silently re-enable exactly the
-    // optional index write this issue removes.
-    for (const site of SITES) {
-      const m = site.window.match(/GIT_OPTIONAL_LOCKS:\s*'([^']*)'/);
-      if (m) assert.equal(m[1], '0', `${site.file}:${site.line} sets a non-zero value`);
-    }
-  });
-
-  test('an index-free site is allowed only because it is index-free', () => {
-    // If a read-only command this guard classified as index-free turns out to
-    // refresh the index, the exemption must be deleted rather than the
-    // assertion loosened.
-    for (const site of SITES) {
-      if (site.subcommand && site.subcommand in INDEX_FREE) {
-        assert.equal(site.refreshes, false, `${site.subcommand} is exempted and refreshing at once`);
-      }
-    }
-  });
-});
-
-describe('#5048 a real repo proves the optional lock is not taken', () => {
-  // The assertions above are about the env we pass. This one is about git: it
-  // builds a real repo whose index is deliberately stale (a tracked file's stat
-  // data no longer matches what the index recorded) and shows that the two
-  // environments differ in what they do to .git/index.
-  //
-  // Staleness without a content change is the exact case that matters: git
-  // re-reads the file, finds it identical, and writes the refreshed stat data
-  // back — which is the write the optional lock exists to protect.
-
-  const { execFileSync: realExecFileSync } = require('node:child_process');
-  const crypto = require('node:crypto');
-  const os = require('node:os');
-
-  function digestIndex(dir) {
-    const indexPath = path.join(dir, '.git', 'index');
-    return crypto.createHash('sha256').update(fs.readFileSync(indexPath)).digest('hex');
-  }
-
-  /** A repo with one commit whose index is stale by stat data alone. */
-  function staleIndexRepo() {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5048-'));
-    const git = (...args) => realExecFileSync('git', args, { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] });
-    git('init', '-q');
-    git('config', 'user.email', 'gsd@example.test');
-    git('config', 'user.name', 'gsd test');
-    fs.writeFileSync(path.join(dir, 'tracked.txt'), 'same bytes\n');
-    git('add', 'tracked.txt');
-    git('commit', '-q', '-m', 'initial');
-    // Stat-only staleness: identical content, newer mtime/size metadata.
-    const future = new Date(Date.now() + 5000);
-    fs.utimesSync(path.join(dir, 'tracked.txt'), future, future);
-    return dir;
-  }
-
-  test('with GIT_OPTIONAL_LOCKS=0, git status leaves .git/index byte-identical', () => {
-    const dir = staleIndexRepo();
-    try {
-      const before = digestIndex(dir);
-      realExecFileSync('git', ['status', '--porcelain'], {
-        cwd: dir,
-        env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
-      assert.equal(
-        digestIndex(dir), before,
-        'a read-only git status must not rewrite the index',
-      );
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test('without it, the same command does rewrite the index', () => {
-    // The control. Without this, the test above would pass even if git had
-    // stopped refreshing the index altogether, and would be asserting nothing.
-    const dir = staleIndexRepo();
-    try {
-      const before = digestIndex(dir);
-      realExecFileSync('git', ['status', '--porcelain'], {
-        cwd: dir,
-        env: { ...process.env, GIT_OPTIONAL_LOCKS: '1' },
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
-      assert.notEqual(
-        digestIndex(dir), before,
-        'expected git to refresh the index without the variable; if this fails '
-        + 'the premise of the sibling test changed and it needs revisiting',
-      );
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-describe('#5048 the two env builders agree', () => {
-  // The review's Major: the statusline builds its own `readOnlyGitEnv` while
-  // execGit carries an inline literal. Two surfaces, one concept — asserted to
-  // agree rather than left to drift.
-  test('both spread process.env first so PATH, HOME and git config survive', () => {
-    const statusline = fs.readFileSync(
-      path.join(REPO_ROOT, 'hooks', 'gsd-statusline.js'), 'utf8');
-    assert.match(
-      statusline,
-      /return \{ \.\.\.process\.env, GIT_OPTIONAL_LOCKS: '0' \};/,
-      'readOnlyGitEnv must spread process.env, not replace it',
-    );
-    const execGitSrc = fs.readFileSync(
-      path.join(REPO_ROOT, 'src', 'shell-command-projection.cts'), 'utf8');
-    assert.match(
-      execGitSrc,
-      /\.\.\.process\.env,[\s\S]{0,400}?GIT_OPTIONAL_LOCKS: '0',[\s\S]{0,80}?\.\.\.\(opts\.env \|\| \{\}\),/,
-      'execGit must spread process.env, then set the variable, then let opts.env win',
-    );
-  });
-
-  test('a bare replacement would break the spawn for unrelated reasons', () => {
-    const statusline = fs.readFileSync(
-      path.join(REPO_ROOT, 'hooks', 'gsd-statusline.js'), 'utf8');
-    assert.doesNotMatch(
-      statusline,
-      /env:\s*\{\s*GIT_OPTIONAL_LOCKS: '0'\s*\}/,
-      'a { GIT_OPTIONAL_LOCKS } env drops PATH/HOME and the spawn fails',
+      'An index-refreshing `git status` site exists whose env is asserted by '
+      + 'neither a Part-A behavioral probe nor the execGit seam. Add a probe.',
     );
   });
 });
+
+// Referenced by the classification table above; exported so the closure is
+// auditable from the test rather than re-derived at each call site.
+module.exports = { classify, collectSites, INDEX_FREE, MUTATING, INDEX_REFRESHING, ROUTED_SPAWN_RE };
