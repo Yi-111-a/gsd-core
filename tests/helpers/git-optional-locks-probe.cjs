@@ -17,7 +17,16 @@
  * that mentions the variable.
  *
  * The patch is installed on the *module object*, not on a copy of a function, so
- * it stays live for modules that destructure at require() time.
+ * it is seen by every call site that reads the property at CALL time. That is a
+ * narrower claim than it first looks, and the limit is worth stating: a module
+ * that captured the function by destructuring `const { execFileSync } = require(
+ * 'node:child_process')` at ITS OWN require() time holds the original binding
+ * and would NOT be intercepted. It works for the seams here because the tsc
+ * CommonJS emit compiles `import { execFileSync } from 'node:child_process'` to
+ * `const node_child_process_1 = require('node:child_process')` and reads
+ * `node_child_process_1.execFileSync` at each call. If a seam ever switches to
+ * a real destructure, the probe goes quiet rather than red — which is why
+ * every probe below asserts it captured at least one git spawn.
  */
 
 const childProcess = require('node:child_process');
