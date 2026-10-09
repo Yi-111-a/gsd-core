@@ -1335,29 +1335,30 @@ function cmdPhasesClear(cwd: string, raw: boolean, args: string[]): void {
     const entries = fs.readdirSync(phasesDir, { withFileTypes: true });
     // #3185 (ADR-3180 Decision 1): this carried the FIFTH copy of the
     // sentinel rule and its THIRD regex variant — `/^999(?:\.|$)/` — which
-    // excluded 999 but NOT 0. Because this is the DESTRUCTIVE path, that
+    // excluded 999 but NOT 0. When this path still deleted, that
     // divergence meant a `0-*` directory `roadmap analyze` preserves as a
-    // sentinel was DELETED here. Routed through the canonical predicate so
+    // sentinel was REMOVED here. Routed through the canonical predicate so
     // every reader of "is this a sentinel phase" agrees by construction.
     // #3639: the DIR-AWARE recognizer — the convention-less id predicate
     // never saw bracket sentinel dirs (GSD.999-07-icebox), so they were
-    // counted for deletion here while the disk guards (post-#3639) preserve
-    // them; the destructive path must not be the one blind reader left.
+    // counted for removal here while the disk guards (post-#3639) preserve
+    // them; the archive path must not be the one blind reader left.
     const dirs = entries.filter((e) => e.isDirectory() && !isSentinelPhaseDir(e.name));
 
     if (dirs.length > 0 && !confirm) {
       error(
-        `phases clear would delete ${dirs.length} phase director${dirs.length === 1 ? 'y' : 'ies'}. ` +
-          `Pass --confirm to proceed.`,
+        `phases clear would archive ${dirs.length} phase director${dirs.length === 1 ? 'y' : 'ies'} to ` +
+          `.planning/milestones/<label>-phases/. Pass --confirm to proceed.`,
       );
     }
 
-    // Guard (#1447): refuse to hard-delete phase directories that contain
-    // uncommitted changes. This prevents data loss when `new-milestone` runs
-    // `phases.clear --confirm` before the operator has archived or committed
-    // phase work from the outgoing milestone.
-    // Use `--force` to bypass this guard only when you have verified that
-    // archive or commit of the outgoing phases is already done.
+    // Guard (#1447): refuse to clear phase directories that contain
+    // uncommitted changes. The guard's purpose is unchanged since #1871 —
+    // only the consequence changed: the directories (and their uncommitted
+    // edits) are archived, not deleted, so `--force` bypasses a visibility
+    // check, not a data-loss check. Use `--force` to bypass this guard only
+    // when you have verified that archive or commit of the outgoing phases
+    // is already done.
     if (dirs.length > 0 && !force) {
       // Compute the path relative to cwd for git status
       let relPhasesDir: string;
@@ -1386,7 +1387,8 @@ function cmdPhasesClear(cwd: string, raw: boolean, args: string[]): void {
         error(
           `phases clear aborted: ${uncommittedLines.length} uncommitted change${uncommittedLines.length === 1 ? '' : 's'} detected in phase directories. ` +
             `Archive or commit outgoing phase work before running this command, ` +
-            `or pass --force to skip this check and permanently delete the phase directories. (#1447)`,
+            `or pass --force to skip this check; the directories, uncommitted changes included, ` +
+            `are archived under .planning/milestones/<label>-phases/. (#1447, #1871)`,
         );
       }
     }
