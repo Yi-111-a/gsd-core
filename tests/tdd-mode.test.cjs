@@ -13,7 +13,7 @@ const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { runGsdTools, createTempProject, cleanup } = require('./helpers.cjs');
+const { runGsdTools, createTempProject, cleanup, homeSandboxEnv } = require('./helpers.cjs');
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -135,7 +135,7 @@ describe('tdd_mode in init plan-phase JSON output', () => {
     ].join('\n');
     fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), roadmap);
     // Ensure config exists
-    runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir });
+    runGsdTools('config-ensure-section', tmpDir, homeSandboxEnv(tmpDir));
   });
 
   afterEach(() => {
@@ -172,7 +172,7 @@ describe('tdd_mode in init execute-phase JSON output', () => {
     ].join('\n');
     fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), roadmap);
     // Ensure config exists
-    runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir });
+    runGsdTools('config-ensure-section', tmpDir, homeSandboxEnv(tmpDir));
   });
 
   afterEach(() => {
