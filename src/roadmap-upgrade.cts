@@ -9,8 +9,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
-import { retryRenameSync } from './shell-command-projection.cjs';
+import { execGit, retryRenameSync } from './shell-command-projection.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -2261,7 +2260,19 @@ function applyMigration(cwd: string, plan: MigrationPlan, options: { dryRun?: bo
   // ── Real run: verify clean working tree ───────────────────────────────────
   let gitStatus: string;
   try {
-    gitStatus = execSync('git status --porcelain', { cwd, encoding: 'utf8', windowsHide: true, timeout: 10_000 });
+    // #5048: this is a read-only spawn, but git still refreshes the index under
+    // it and takes the optional `.git/index.lock` to write the refreshed copy
+    // back — which can lose a race against a real `git add` / `git commit` in
+    // the same repo. Routing through the shared execGit seam (CONTEXT.md, OS
+    // Shell Projection) is what gets GIT_OPTIONAL_LOCKS=0 here; a bare execSync
+    // bypassed the seam and therefore the opt-out, so this call site was the one
+    // read-only `git status` the seam change did not reach. shell-free, so no
+    // argv quoting or PATH-resolution policy is introduced.
+    const result = execGit(['status', '--porcelain'], { cwd, timeout: 10_000 });
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr || `git exited ${result.exitCode}`);
+    }
+    gitStatus = result.stdout;
   } catch (err) {
     throw new Error(`git status failed: ${(err as Error).message}`);
   }

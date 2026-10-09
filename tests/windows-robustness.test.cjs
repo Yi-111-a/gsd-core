@@ -271,15 +271,14 @@ describe('bug #685: Windows spawns must set windowsHide:true (no console-window 
     assert.match(region, /windowsHide:\s*true/, 'execGit spawnSync must set windowsHide: true');
   });
 
-  test('roadmap-upgrade execSync git calls all set windowsHide', () => {
+  test('roadmap-upgrade spawns git only through the execGit seam', () => {
+    // #5048 moved the `git status --porcelain` precondition off a bare execSync
+    // and onto execGit, which sets windowsHide: true for every call (asserted by
+    // the two execGit tests above). What this guards now is the routing: if a
+    // direct spawn of git is ever reintroduced here it would bypass that seam.
     const src = read('src/roadmap-upgrade.cts');
-    const calls = src.match(/execSync\([^)]*\)/g) || [];
-    // #1542 made rollback git-independent (surgical fs restore), so the only
-    // remaining git execSync is the `git status --porcelain` precondition. The
-    // durable guard is that EVERY git execSync still present sets windowsHide.
-    assert.ok(calls.length >= 1, 'expected at least the roadmap-upgrade git status execSync call to be present');
-    const missing = calls.filter((c) => !/windowsHide:\s*true/.test(c));
-    assert.deepEqual(missing, [], `execSync without windowsHide:\n${missing.join('\n')}`);
+    const direct = src.match(/(?:execSync|execFileSync|spawnSync)\s*\(\s*(?:`|'|")?git\b/g) || [];
+    assert.deepEqual(direct, [], `roadmap-upgrade must spawn git via execGit, not directly:\n${direct.join('\n')}`);
   });
 
   test('gsd-check-update spawn retains windowsHide (precedent guard)', () => {

@@ -29,9 +29,10 @@
  * the `ROUTED_SPAWN_RE` half that existed to catch spawns "routed through a
  * variable or a wrapper" was never wired into the collection loop, so it
  * exported a claim the file never enforced. That half is gone rather than
- * fixed, and this header no longer claims a new spawn site cannot be added
- * silently: **it cannot.** A `git status` added to a module no probe reaches is
- * not covered by anything here.
+ * fixed. What replaces the claim is the two blocks below: a real probe for each
+ * named seam, and a real repo where the variable is shown to change what git
+ * does. What it does NOT replace is coverage of spawn sites nobody enumerated —
+ * see the exclusions list, and read it as the open edge of this guard.
  *
  * What replaces the enumeration is the last block, which is the part that
  * actually establishes that the variable is load-bearing: a real repo whose
@@ -40,11 +41,26 @@
  * default environment rewrites it. Everything above this line proves the code
  * sets the variable; that block proves setting it changes what git does.
  *
- * The honest scope of the guard is therefore: the six seams named below cannot
+ * The honest scope of the guard is therefore: the seams named below cannot
  * regress their env without a test going red, and the value they set is
  * verified to matter. Adding a *new* read-only git spawn means adding a probe
- * for it in this file — the gap the removed enumeration papered over is the gap
- * this comment now states.
+ * for it in this file.
+ *
+ * ## Sites deliberately NOT probed, and why
+ *
+ * So that a later reader can tell a considered exclusion from an oversight:
+ *   - `src/phase.cts` `worktree list` — reads .git/worktrees metadata; does not
+ *     open the index, so there is no optional write to suppress.
+ *   - `hooks/gsd-workflow-guard.js` `branch --show-current` — reads HEAD/refs.
+ *   - `hooks/gsd-statusline.js` `rev-list` — walks commit objects.
+ *   - `src/check-command-router.ts`, `gate-ui-safety`, `decision-coverage-
+ *     support` — no git spawn of their own; they delegate to a probed seam.
+ *   - `scripts/*.cjs` — repo-development and CI tooling, not shipped runtime.
+ *
+ * The exclusion that actually cost a review round was the inverse case:
+ * `src/roadmap-upgrade.cts` ran a real index-refreshing `git status` through a
+ * bare `execSync`, outside `execGit`, and was therefore missed. It is now routed
+ * through the seam and probed below.
  */
 
 const { describe, test } = require('node:test');
@@ -149,6 +165,30 @@ describe('#5048 every read-only seam hands GIT_OPTIONAL_LOCKS=0 to the OS', () =
       gitExec(REPO_ROOT, ['log', '--format=%H', '-1']);
     });
     assertLockedOut(gitSpawns(calls), 'gitExec');
+  });
+
+  test('roadmap-upgrade applyMigration clean-tree check (the site that bypassed the seam)', (t) => {
+    // This one was a real miss, not a hypothetical: applyMigration ran
+    // `git status --porcelain` through a bare `execSync` on the real-run path,
+    // outside execGit, so it refreshed and locked the index exactly like the
+    // seams above. It is routed through the seam now and probed here so the
+    // regression cannot return through the old call shape.
+    //
+    // The plan is empty on every field the migration walks, so the function
+    // reaches the status check and then does nothing else — the assertion is on
+    // the spawn env, not on what a migration would write.
+    const { applyMigration } = require('../gsd-core/bin/lib/roadmap-upgrade.cjs');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5048-'));
+    t.after(() => helpers.cleanup(root));
+    const plan = { alreadyMigrated: false, phases: [], roadmapEdits: [], crossRefEdits: [] };
+    const calls = captureSpawns(() => applyMigration(root, plan, { dryRun: false }));
+    const git = gitSpawns(calls);
+    assert.ok(git.length > 0, 'applyMigration spawned no git; the probe is broken');
+    assert.ok(
+      git.some(s => gitSubcommand(s.argv) === 'status'),
+      `applyMigration no longer runs \`git status\`; saw ${git.map(s => s.argv.join(' ')).join(' | ')}`,
+    );
+    assertLockedOut(git, 'roadmap-upgrade');
   });
 
   test('gsd-statusline readGitStatus', () => {
