@@ -315,6 +315,43 @@ describe('resolveEvaluationScope — plan and quick units', () => {
     assert.equal(resolveEvaluationScope(repo.dir, { kind: 'plan', planId: '' }).reason, 'invalid-plan-id');
   });
 
+  test('[regression] a project-coded plan id resolves the plan\'s own commits (#5271)', () => {
+    // `init.execute-phase` hands out `PRJ-01` where `init.plan-phase` hands out `01`, so the
+    // gates' `--plan PRJ-01-01` used to resolve "no-matching-commits" at exit 0 — the honest
+    // answer for a plan that has NOT started — for a plan that has.
+    const repo = makeRepo();
+    commit(repo, 'src/a.js', 'feat(01-01): a');
+    commit(repo, 'src/b.js', 'fix(01-01)!: breaking');
+    commit(repo, 'src/c.js', 'feat(01-02): another plan');
+    commit(repo, 'src/d.js', 'feat(01-010): not this plan');
+    const scope = resolveEvaluationScope(repo.dir, { kind: 'plan', planId: 'PRJ-01-01' });
+    assert.equal(scope.status, 'resolved');
+    assert.equal(scope.source, 'plan-subjects');
+    assert.notEqual(scope.reason, 'no-matching-commits', 'the plan HAS commits, so an empty scope is not the answer');
+    assert.deepEqual(
+      scope.commits.map((c) => c.subject).sort(),
+      ['feat(01-01): a', 'fix(01-01)!: breaking'],
+      'the coded id resolves the plan\'s commits, and only its own',
+    );
+    const bare = resolveEvaluationScope(repo.dir, { kind: 'plan', planId: '01-01' });
+    assert.deepEqual(
+      scope.commits.map((c) => c.sha).sort(),
+      bare.commits.map((c) => c.sha).sort(),
+      'the coded and bare ids name ONE plan, so they resolve the same commits (#5177 grammar)',
+    );
+  });
+
+  test('[regression] a coded plan id matches a commit spelled either way, and no other code (#5271)', () => {
+    const matches = (planId, subject) => new RegExp(planSubjectPattern(planId)).test(subject);
+    assert.ok(matches('PRJ-01-01', 'feat(01-01): a'), 'the executor writes the BARE phase token');
+    assert.ok(matches('PRJ-01-01', 'feat(PRJ-01-01): a'), 'and the coded spelling still resolves');
+    assert.ok(matches('PRJ-01-01', 'fix(PRJ-1-1)!: breaking'), 'zero padding stays tolerant under the code');
+    assert.ok(!matches('PRJ-01-01', 'feat(OTHER-01-01): a'), 'a DIFFERENT project code is a different plan');
+    assert.ok(!matches('PRJ-01-01', 'feat(01-010): a'), 'and the id boundary is unchanged');
+    assert.ok(matches('PROJ_V2-03-01', 'feat(03-01): a'), 'an underscore-bearing code is the project_code grammar');
+    assert.ok(!matches('PRJ-01', 'feat(01): a'), 'a code WITHOUT a plan segment is still matched literally');
+  });
+
   test('[regression] a plan commit that lives only on another branch is not returned', () => {
     const repo = makeRepo();
     commit(repo, 'src/a.js', 'feat(03-01): green');

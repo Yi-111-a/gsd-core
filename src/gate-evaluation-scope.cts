@@ -37,6 +37,9 @@ import { gateVerdict, gateUnreadable, gateUsageFailure, isGateUsageFailure, GATE
 import type { GateResult } from './gate-verdict.cjs';
 import { resolveContainedPath, resolvePhaseDir } from './gate-phase-context.cjs';
 import { escapeEre } from './pattern.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import phaseIdMod = require('./phase-id.cjs');
+const { stripProjectCodePrefix } = phaseIdMod;
 import { readPlanScanEvidence } from './gate-evidence.cjs';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -173,21 +176,57 @@ function paddedPattern(value: string): string {
 }
 
 /**
+ * The `<phase>-<plan>` fragment of a plan subject pattern, or null when `id` is not that shape.
+ *
+ * Zero-padding tolerant in both halves: `03-01` yields `0*3-0*1`, so `feat(03-01):`, `test(3-1):`
+ * and `fix(03-01)!:` match while `feat(03-010):` does not (#4003, #4619, #4748).
+ */
+function phasePlanPattern(id: string): string | null {
+  const dash = id.indexOf('-');
+  const phasePart = dash > 0 ? id.slice(0, dash) : '';
+  const planPart = dash > 0 ? id.slice(dash + 1) : '';
+  if (/^[0-9A-Za-z.]+$/.test(phasePart) && /^[0-9A-Za-z.]+$/.test(planPart)) {
+    return `${paddedPattern(phasePart)}-${paddedPattern(planPart)}`;
+  }
+  return null;
+}
+
+/**
  * The anchored subject pattern for a plan id, or null when `planId` is empty, over-long or carries a
  * control / whitespace character.
  *
  * A `<phase>-<plan>` id (`03-01`) is zero-padding tolerant: `feat(03-01):`, `test(3-1):` and
- * `fix(03-01)!:` match, `feat(03-010):` does not. Any other id (a plan FILE NAME that does not follow
- * the numbering) is matched LITERALLY — every ERE metacharacter escaped — so `x.*` or `a[b]` can only
- * match a commit that names that exact id, and never widens the pattern.
+ * `fix(03-01)!:` match, `feat(03-010):` does not. A project-coded id (`PRJ-01-01`, #5271) matches
+ * either spelling of the SAME plan — `feat(PRJ-01-01):` and `feat(01-01):` — because the two init
+ * verbs hand out different phase tokens for one plan. Any other id (a plan FILE NAME that does not
+ * follow the numbering) is matched LITERALLY — every ERE metacharacter escaped — so `x.*` or `a[b]`
+ * can only match a commit that names that exact id, and never widens the pattern.
  */
 export function planSubjectPattern(planId: string): string | null {
   if (planId.length === 0 || planId.length > 200 || /[\s\x00-\x1f\x7f]/.test(planId)) return null;
-  const dash = planId.indexOf('-');
-  const phasePart = dash > 0 ? planId.slice(0, dash) : '';
-  const planPart = dash > 0 ? planId.slice(dash + 1) : '';
-  if (/^[0-9A-Za-z.]+$/.test(phasePart) && /^[0-9A-Za-z.]+$/.test(planPart)) {
-    return `^[a-z]+\\(${paddedPattern(phasePart)}-${paddedPattern(planPart)}\\)!?:`;
+  const direct = phasePlanPattern(planId);
+  if (direct) return `^[a-z]+\\(${direct}\\)!?:`;
+  // #5271: `init.execute-phase` returns `phase_number: "PRJ-01"` where `init.plan-phase` returns
+  // `padded_phase: "01"`, and every gate builds its `--plan` from the former. Splitting `PRJ-01-01`
+  // at its FIRST dash leaves `01-01` as the plan half, which is not a plan number, so the id fell
+  // through to the literal pattern that no executor commit can ever carry — an empty scope at exit
+  // 0, which is the correct answer for a plan that has NOT started and the wrong one for one that
+  // has. Retry on the project-code-stripped id (the phase-id owner owns that prefix grammar) and
+  // make the code OPTIONAL, so the commit the executor actually wrote still matches.
+  const bare = stripProjectCodePrefix(planId);
+  if (bare !== planId) {
+    const coded = phasePlanPattern(bare);
+    if (coded) {
+      // The stripped span INCLUDES the separator dash the owner consumed, so it is interpolated
+      // whole — `PRJ-` — rather than the bare code with a second dash appended.
+      const codePrefix = planId.slice(0, planId.length - bare.length);
+      // The code is a REAL optional group `(PRJ-)?`, never `(?:PRJ-)`: the same string is handed to
+      // `git log --extended-regexp`, and POSIX ERE has no non-capturing group, so `(?:…)` is a syntax
+      // error on the git side while the JS-side `RegExp` (which accepts it) stayed green. The `?`
+      // must follow the GROUP — placed on the escaped `\(` of the subject paren it would merely make
+      // that paren optional.
+      return `^[a-z]+\\((${escapeEre(codePrefix)})?${coded}\\)!?:`;
+    }
   }
   return `^[a-z]+\\(${escapeEre(planId)}\\)!?:`;
 }
