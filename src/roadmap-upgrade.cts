@@ -2268,20 +2268,23 @@ function applyMigration(cwd: string, plan: MigrationPlan, options: { dryRun?: bo
     // bypassed the seam and therefore the opt-out, so this call site was the one
     // read-only `git status` the seam change did not reach. shell-free, so no
     // argv quoting or PATH-resolution policy is introduced.
-    const result = execGit(['status', '--porcelain'], { cwd, timeout: 10_000 });
+    const statusTimeoutMs = 10_000;
+    const result = execGit(['status', '--porcelain'], { cwd, timeout: statusTimeoutMs });
     // #5048: execSync carried the cause on the thrown error. execGit reports a
-    // timeout, a signal or a spawn failure through `timedOut`/`signal`/`error`
-    // with an exit code of `status ?? 1` and an empty stderr, so branch on
-    // those first — otherwise every one of them reads as "git exited 1" and
-    // the cause is dropped. Only a genuine non-zero exit falls through.
+    // timeout, a spawn/buffer failure or a signal through `timedOut`/`error`/
+    // `signal` with an exit code of `status ?? 1` and often an empty stderr.
+    // Order matters: a maxBuffer overflow returns signal SIGTERM *and*
+    // error.code ENOBUFS — check `error` before `signal` so the real cause is
+    // not reported as "killed by SIGTERM". Only a genuine non-zero exit falls
+    // through. (ENOENT is rewritten by `_spawnResult` to exit 127 + stderr.)
     if (result.timedOut) {
-      throw new Error(`git status timed out after ${10_000} ms`);
-    }
-    if (result.signal) {
-      throw new Error(`git status was killed by ${result.signal}`);
+      throw new Error(`git status timed out after ${statusTimeoutMs} ms`);
     }
     if (result.error) {
       throw new Error(`git status failed to start: ${result.error.message}`);
+    }
+    if (result.signal) {
+      throw new Error(`git status was killed by ${result.signal}`);
     }
     if (result.exitCode !== 0) {
       throw new Error(result.stderr || `git exited ${result.exitCode}`);

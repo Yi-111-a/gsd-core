@@ -387,7 +387,15 @@ describe('roadmap-upgrade clean-tree failure reports its cause (#5048)', () => {
     assert.match(thrown.message, /^git status failed: git status was killed by SIGKILL$/);
   });
 
-  test('a git that never started reports the spawn failure, not "git exited 1"', (t) => {
+  test('a maxBuffer overflow reports ENOBUFS, not "killed by SIGTERM"', (t) => {
+    // spawnSync shape for stdout over maxBuffer: status null, signal SIGTERM,
+    // error.code ENOBUFS. error must win over signal or the cause is dropped.
+    const err = Object.assign(new Error('spawnSync git ENOBUFS'), { code: 'ENOBUFS' });
+    const thrown = statusFailureThrows(t, { status: null, stdout: '', stderr: '', signal: 'SIGTERM', error: err });
+    assert.match(thrown.message, /^git status failed: git status failed to start: spawnSync git ENOBUFS$/);
+  });
+
+  test('a git binary that is missing reports the spawn failure, not a bare exit code', (t) => {
     const err = Object.assign(new Error('spawnSync git ENOENT'), { code: 'ENOENT' });
     const thrown = statusFailureThrows(t, { status: null, stdout: '', stderr: 'git: not found', signal: null, error: err });
     assert.match(thrown.message, /^git status failed: git status failed to start: spawnSync git ENOENT$/);

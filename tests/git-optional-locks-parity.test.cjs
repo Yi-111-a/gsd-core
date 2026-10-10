@@ -35,29 +35,23 @@
  * default environment rewrites it. Everything above this line proves the code
  * sets the variable; that block proves setting it changes what git does.
  *
- * The honest scope of the guard is therefore: the seams named below cannot
- * regress their env without a test going red, and the value they set is
- * verified to matter. Adding a *new* read-only git spawn means adding a probe
- * for it in this file.
+ * Scope: the seams probed below cannot regress their env without a red test,
+ * and the real-repo block shows the variable is load-bearing. A *new*
+ * index-refreshing read-only spawn needs a new probe here.
  *
- * ## Sites deliberately NOT probed, and why
+ * ## Sites deliberately NOT probed
  *
- * So that a later reader can tell a considered exclusion from an oversight:
- *   - `src/phase.cts` `worktree list` — reads .git/worktrees metadata; does not
- *     open the index, so there is no optional write to suppress.
- *   - `hooks/gsd-workflow-guard.js` `branch --show-current` — reads HEAD/refs.
- *   - `hooks/gsd-statusline.js` `rev-list` — walks commit objects.
+ *   - `src/phase.cts` `worktree list` — worktrees metadata; no index refresh.
+ *   - `hooks/gsd-workflow-guard.js` `branch --show-current` — HEAD/refs only.
+ *   - `hooks/gsd-statusline.js` `rev-list` — commit objects only.
  *   - `src/check-command-router.cts`, `gate-ui-safety`, `decision-coverage-
  *     support` — no git spawn of their own; they delegate to a probed seam.
- *   - `scripts/*.cjs` — shipped in the npm package (`files` includes `scripts`
- *     minus a denylist), but their git calls are repo-development and CI
- *     tooling that never refreshes the index, so there is no optional lock to
- *     suppress.
+ *   - `scripts/*.cjs` — package scripts; no index-refreshing optional lock.
+ *   - Shipped workflow markdown snippets (`gsd-core/workflows/*.md`) that
+ *     shell out to bare `git status` — out of scope for this TypeScript/hook
+ *     seam change; not probed.
  *
- * The exclusion that actually cost a review round was the inverse case:
- * `src/roadmap-upgrade.cts` ran a real index-refreshing `git status` through a
- * bare `execSync`, outside `execGit`, and was therefore missed. It is now routed
- * through the seam and probed below.
+ * `src/roadmap-upgrade.cts` is probed below (was previously a bare execSync).
  */
 
 const { describe, test } = require('node:test');
