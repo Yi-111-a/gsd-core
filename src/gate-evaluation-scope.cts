@@ -38,6 +38,8 @@ import type { GateResult } from './gate-verdict.cjs';
 import { resolveContainedPath, resolvePhaseDir } from './gate-phase-context.cjs';
 import { escapeEre } from './pattern.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
+import phaseIdMod = require('./phase-id.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspaceMod = require('./planning-workspace.cjs');
 const { readScopedConfigValue } = planningWorkspaceMod;
 import { readPlanScanEvidence } from './gate-evidence.cjs';
@@ -203,7 +205,7 @@ function phasePlanPattern(id: string): string | null {
  * stripped, so an id that merely LOOKS coded keeps its literal-match guarantee.
  */
 function configuredCodePrefix(planId: string, projectCode: string | null): string | null {
-  if (projectCode === null || !/^[A-Z][A-Z0-9_]*$/.test(projectCode)) return null;
+  if (projectCode === null || !phaseIdMod.PROJECT_CODE_VALUE_RE.test(projectCode)) return null;
   const prefix = `${projectCode}-`;
   return planId.startsWith(prefix) ? prefix : null;
 }
@@ -248,18 +250,37 @@ export function planSubjectPattern(planId: string, projectCode: string | null = 
     // Major 3: the milestone-prefixed coded shape `PRJ-01-02-03` strips to `01-02-03`, whose plan
     // half still carries a dash, so `phasePlanPattern` returns null and the id would fall to the
     // LITERAL `PRJ-01-02-03` — a spelling no executor commit carries, i.e. a started plan reading
-    // as unstarted. Keep the code group OPTIONAL on the literal fall-through too, so the same id
-    // matches both `feat(PRJ-01-02-03):` and `feat(01-02-03):`.
+    // as unstarted. Such a remainder still takes the code group, because it starts with the phase
+    // number: it IS the coded plan, one segment longer.
+    // Minor 2: an EMPTY or non-numeric remainder takes NO group. `PRJ-` stripped to '' and emitted
+    // `(PRJ-)?` alone, which matches `feat():`; `PRJ-a.b` matches `feat(a.b):`, another plan's
+    // literal id. Both are strictly WIDER than the pre-#5271 pattern, which is the one property
+    // this fallback must keep — so the group rides on `planShaped` alone.
+    const planShaped = coded !== null || /^\d/.test(stripped);
+    if (!planShaped) return `^[a-z]+\\(${escapeEre(planId)}\\)!?:`;
     return `^[a-z]+\\((${escapeEre(prefix)})?${coded ?? escapeEre(stripped)}\\)!?:`;
   }
   return `^[a-z]+\\(${escapeEre(planId)}\\)!?:`;
 }
 
-/** The project's configured `project_code`, or null when it is absent, non-string or not a valid code. */
+/**
+ * The project's configured `project_code`, or null when it is absent, non-string or outside the
+ * supported grammar.
+ *
+ * SUPPORTED GRAMMAR: `PROJECT_CODE_VALUE_RE` (`^[A-Z][A-Z0-9_]*$`) — the phase-id owner's one
+ * grammar, the same half of the `project_code` value `.planning/config.json` documents. `config-set`
+ * stores `project_code` unvalidated, so a lowercase (`prj`) or hyphenated (`AUTH-X`) value is
+ * possible; such a value is treated as ABSENT rather than matched with a second, wider grammar,
+ * which means the coded id falls back to its LITERAL spelling and #5271's symptom reappears for
+ * that project. That degradation is the safe direction — never WIDER than the pre-#5271 pattern,
+ * since a literal id can only match a subject naming that exact id — but it is a real limit:
+ * a project that configures a code outside the supported grammar does not get coded-id resolution.
+ * The supported grammar is stated in `.changeset/eager-jaguars-tumble.md` and `docs/ARCHITECTURE.md`.
+ */
 function configuredProjectCode(projectDir: string): string | null {
   const { present, value } = readScopedConfigValue(projectDir, ['project_code']);
   if (!present || typeof value !== 'string' || value.length === 0) return null;
-  return /^[A-Z][A-Z0-9_]*$/.test(value) ? value : null;
+  return phaseIdMod.PROJECT_CODE_VALUE_RE.test(value) ? value : null;
 }
 
 // ─── Git plumbing ─────────────────────────────────────────────────────────────
