@@ -13,7 +13,7 @@ const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { runGsdTools, createTempProject, cleanup, homeSandboxEnv } = require('./helpers.cjs');
+const { runGsdTools, createTempProject, createTempDir, cleanup, homeSandboxEnv, withIsolatedProcessState } = require('./helpers.cjs');
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -78,7 +78,7 @@ describe('workflow.tdd_mode config round-trip', () => {
   beforeEach(() => {
     tmpDir = createTempProject();
     // Create a config file first
-    runGsdTools('config-ensure-section', tmpDir, { HOME: tmpDir });
+    runGsdTools('config-ensure-section', tmpDir, homeSandboxEnv(tmpDir));
   });
 
   afterEach(() => {
@@ -191,5 +191,69 @@ describe('tdd_mode in init execute-phase JSON output', () => {
     assert.ok(result.success, `init execute-phase --tdd failed: ${result.error}`);
     const json = JSON.parse(result.output);
     assert.strictEqual(json.tdd_mode, true);
+  });
+});
+
+
+// ─── #5276 canary: sandboxed seed ignores ambient defaults.json ────────────
+// Positive control: an unsandboxed seed must pick up workflow.tdd_mode from a
+// poisoned ambient home (reachable via HOME and USERPROFILE). The sandboxed
+// seed must leave the key absent from the persisted config.json.
+
+describe('#5276 homeSandboxEnv canary for tdd_mode defaults', () => {
+  test('sandboxed config-ensure-section ignores poisoned ambient defaults.json', (t) => {
+    const ambientHome = createTempDir('gsd-5276-ambient-home-');
+    t.after(() => cleanup(ambientHome));
+    fs.mkdirSync(path.join(ambientHome, '.gsd'));
+    fs.writeFileSync(
+      path.join(ambientHome, '.gsd', 'defaults.json'),
+      JSON.stringify({ workflow: { tdd_mode: true } }),
+    );
+
+    const controlDir = createTempProject();
+    const seededDir = createTempProject();
+    t.after(() => { cleanup(controlDir); cleanup(seededDir); });
+
+    const [control, seeded] = withIsolatedProcessState(() => {
+      Object.assign(process.env, homeSandboxEnv(ambientHome));
+      return [
+        runGsdTools('config-ensure-section', controlDir),
+        runGsdTools('config-ensure-section', seededDir, homeSandboxEnv(seededDir)),
+      ];
+    });
+
+    assert.ok(control.success, `Control seed failed: ${control.error}`);
+    assert.strictEqual(
+      readConfig(controlDir).workflow?.tdd_mode,
+      true,
+      'unsandboxed seed must inherit workflow.tdd_mode from ambient defaults.json',
+    );
+
+    assert.ok(seeded.success, `Sandboxed seed failed: ${seeded.error}`);
+    assert.ok(
+      !Object.prototype.hasOwnProperty.call(readConfig(seededDir).workflow || {}, 'tdd_mode'),
+      'homeSandboxEnv seed must not inherit tdd_mode from ambient defaults.json',
+    );
+
+    // HOME-only while USERPROFILE still points at the poisoned ambient home:
+    // proves the old pattern still leaks on win32 (and remains a canary on
+    // any platform once USERPROFILE is set).
+    const homeOnlyDir = createTempProject();
+    t.after(() => cleanup(homeOnlyDir));
+    const homeOnly = withIsolatedProcessState(() => {
+      Object.assign(process.env, homeSandboxEnv(ambientHome));
+      return runGsdTools('config-ensure-section', homeOnlyDir, { HOME: homeOnlyDir });
+    });
+    assert.ok(homeOnly.success, `HOME-only seed failed: ${homeOnly.error}`);
+    // On platforms where os.homedir() prefers USERPROFILE (win32), HOME-only
+    // still leaks. On Unix HOME wins, so the key stays absent — either way the
+    // sandboxed path above is the contract under test.
+    if (process.platform === 'win32') {
+      assert.strictEqual(
+        readConfig(homeOnlyDir).workflow?.tdd_mode,
+        true,
+        'HOME-only seed must leak via USERPROFILE on win32',
+      );
+    }
   });
 });
