@@ -364,7 +364,7 @@ describe('resolveEvaluationScope — plan and quick units', () => {
     assert.ok(!matches('AUTH-01-02', 'feat(1-2):'), 'nor the unpadded spelling');
     assert.ok(matches('setup-1-2', 'feat(setup-1-2): its own'), 'a hyphenated plan-file id stays literal');
     assert.ok(!matches('setup-1-2', 'feat(1-2): unrelated'), 'and does not resolve a numbered plan either');
-    assert.ok(matches('setup-1-2', 'feat(01-02): unrelated') === false, 'nor a padded one');
+    assert.ok(!matches('setup-1-2', 'feat(01-02): unrelated'), 'nor a padded one');
     assert.ok(!matches('prj-01-01', 'feat(01-01): a'), 'the code match is CASE-SENSITIVE');
     assert.ok(matches('prj-01-01', 'feat(prj-01-01): a'), 'so a lowercase code is matched literally');
     assert.ok(!matches('PRJ-01', 'feat(01): a'), 'a code WITHOUT a plan segment stays literal');
@@ -411,6 +411,100 @@ describe('resolveEvaluationScope — plan and quick units', () => {
       assert.equal(scope.status, 'resolved', `${planId} resolves`);
       assert.deepEqual(scope.commits, [], `${planId} has no commits of its own`);
     }
+  });
+
+  // #5271 Minor 2: the OPTIONAL code group rode on the bare literal fall-through, so a remainder
+  // that is not a plan number kept it and the pattern widened past the pre-#5271 literal.
+  test('[regression] a coded id whose remainder is not a plan number stays literal (#5271 Minor 2)', () => {
+    assert.equal(planSubjectPattern('PRJ-', 'PRJ'), '^[a-z]+\\(PRJ-\\)!?:',
+      '`PRJ-` strips to an empty remainder, so the OPTIONAL group would match a bare `feat():`');
+    assert.equal(planSubjectPattern('PRJ-a.b', 'PRJ'), '^[a-z]+\\(PRJ-a\\.b\\\)!?:',
+      'a non-numeric remainder keeps the whole id literal, not `(PRJ-)?a\\.b`');
+    for (const [planId, subject] of [
+      ['PRJ-', 'feat(): a subject no plan assigns'],
+      ['PRJ-a.b', 'feat(a.b): another plan\'s literal id'],
+    ]) {
+      const pattern = planSubjectPattern(planId, 'PRJ');
+      assert.ok(!new RegExp(pattern).test(subject), `${planId} must not match ${subject}`);
+    }
+    // The shapes that legitimately take the group are unchanged by the narrowing.
+    assert.equal(planSubjectPattern('PRJ-01-01', 'PRJ'), '^[a-z]+\\((PRJ-)?0*1-0*1\\)!?:');
+    assert.equal(planSubjectPattern('PRJ-01-02-03', 'PRJ'), '^[a-z]+\\((PRJ-)?01-02-03\\)!?:',
+      'the milestone-prefixed coded shape still takes the group: its remainder starts with the phase number');
+  });
+
+  // #5271 Nit 4 / Minor 3: `configuredProjectCode` treats an unsupported grammar as ABSENT. Both
+  // that degradation and an unreadable config must be pinned, not assumed.
+  test('[regression] an unsupported or unreadable project_code leaves coded ids literal (#5271 Nit 4, Minor 3)', () => {
+    const configured = (value) => {
+      const repo = makeRepo();
+      write(repo.dir, '.planning/config.json', typeof value === 'string' ? value : JSON.stringify({ project_code: value }));
+      repo.git('add', '.planning/config.json');
+      repo.git('commit', '-m', 'docs(config): set project_code');
+      return repo;
+    };
+    const codedCommit = (repo) => commit(repo, 'src/coded.js', 'feat(01-01): the bare spelling');
+    for (const [label, value] of [['a lowercase code', 'prj'], ['a hyphenated code', 'AUTH-X'], ['an empty code', '']]) {
+      const repo = configured(value);
+      codedCommit(repo);
+      const scope = resolveEvaluationScope(repo.dir, { kind: 'plan', planId: 'PRJ-01-01' });
+      assert.deepEqual(scope.commits, [], `${label} is outside the supported grammar, so the id stays literal`);
+      assert.equal(scope.status, 'resolved', `${label} still resolves (empty), it never widens`);
+    }
+    const unparseable = configured('{ not json');
+    codedCommit(unparseable);
+    const scope = resolveEvaluationScope(unparseable.dir, { kind: 'plan', planId: 'PRJ-01-01' });
+    assert.deepEqual(scope.commits, [], 'an unparseable config reads as absent, never as a wider pattern');
+    // A supported code still resolves the coded id, so the rows above are the grammar and not a
+    // broken reader (the positive path itself is covered end-to-end by the real-git row above).
+    for (const code of ['PRJ', 'PROJ_V2']) {
+      const codedId = `${code}-01-01`;
+      const supported = planSubjectPattern(codedId, code);
+      assert.ok(new RegExp(supported).test('feat(01-01): the bare spelling'), `${codedId} resolves the bare spelling`);
+      assert.ok(new RegExp(supported).test(`feat(${codedId}): the coded spelling`), `${codedId} resolves the coded spelling`);
+    }
+  });
+
+  // #5271 Minor 1: hand-picked ids over a fixed fixture read as coverage. The transform's own
+  // invariant is the property: whatever the code and the id, the coded spelling adds exactly the
+  // CREDITS of its own commits, and a NON-configured prefix is never a substitute for one.
+  test('[property] a coded id resolves the same subjects as its bare id, plus the coded spelling (#5271 Minor 1)', () => {
+    const pad = (n) => String(n).padStart(2, '0');
+    fc.assert(
+      fc.property(
+        fc.stringMatching(/^[A-Z][A-Z0-9_]{0,6}$/),
+        fc.integer({ min: 0, max: 40 }),
+        fc.integer({ min: 0, max: 40 }),
+        fc.stringMatching(/^[A-Z][A-Z0-9_]{0,6}$/),
+        (code, phase, plan, otherCode) => {
+          const bareId = `${pad(phase)}-${pad(plan)}`;
+          const codedId = `${code}-${bareId}`;
+          const corpus = [
+            `feat(${bareId}): padded spelling`,
+            `fix(${bareId})!: padded with the breaking marker`,
+            `test(${phase}-${plan}): unpadded spelling`,
+            `feat(${codedId}): the coded spelling`,
+            `fix(${codedId})!: the coded spelling with the breaking marker`,
+            `feat(${otherCode}-${bareId}): another project's code`,
+            `feat(${otherCode}-${phase}-${plan}): another project's code, unpadded`,
+          ];
+          const matched = (pattern) => corpus.filter((subject) => new RegExp(pattern).test(subject));
+          const bareMatches = matched(planSubjectPattern(bareId));
+          const codedMatches = matched(planSubjectPattern(codedId, code));
+          assert.ok(
+            bareMatches.every((subject) => codedMatches.includes(subject)),
+            `${codedId} must match every subject ${bareId} matches`,
+          );
+          for (const subject of codedMatches) {
+            assert.ok(
+              bareMatches.includes(subject) || subject.startsWith(`feat(${codedId})`) || subject.startsWith(`fix(${codedId})`),
+              `${codedId} may add only its OWN coded spelling, but it also matched ${subject}`,
+            );
+          }
+        },
+      ),
+      { numRuns: 200 },
+    );
   });
 
   test('[regression] a plan commit that lives only on another branch is not returned', () => {
