@@ -2281,7 +2281,17 @@ function applyMigration(cwd: string, plan: MigrationPlan, options: { dryRun?: bo
       throw new Error(`git status timed out after ${statusTimeoutMs} ms`);
     }
     if (result.error) {
-      throw new Error(`git status failed to start: ${result.error.message}`);
+      // The cause is not always a failed spawn: ENOBUFS and EPERM reach this
+      // branch with the process already started (a maxBuffer overflow returns
+      // signal SIGTERM *and* error.code ENOBUFS). So the message stays neutral
+      // about starting and names the code instead of inferring a cause from it.
+      const code = (result.error as { code?: string }).code;
+      const why = code === 'ENOBUFS' ? 'output exceeded the buffer' : code;
+      const detail =
+        why && !result.error.message.includes(why)
+          ? `${result.error.message} (${why})`
+          : result.error.message;
+      throw new Error(detail);
     }
     if (result.signal) {
       throw new Error(`git status was killed by ${result.signal}`);

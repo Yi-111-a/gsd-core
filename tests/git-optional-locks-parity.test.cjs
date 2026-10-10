@@ -51,7 +51,7 @@
  *     shell out to bare `git status` — out of scope for this TypeScript/hook
  *     seam change; not probed.
  *
- * `src/roadmap-upgrade.cts` is probed below (was previously a bare execSync).
+ * `src/roadmap-upgrade.cts` is probed below.
  */
 
 const { describe, test } = require('node:test');
@@ -158,12 +158,10 @@ describe('#5048 every read-only seam hands GIT_OPTIONAL_LOCKS=0 to the OS', () =
     assertLockedOut(gitSpawns(calls), 'gitExec');
   });
 
-  test('roadmap-upgrade applyMigration clean-tree check (the site that bypassed the seam)', (t) => {
-    // This one was a real miss, not a hypothetical: applyMigration ran
-    // `git status --porcelain` through a bare `execSync` on the real-run path,
-    // outside execGit, so it refreshed and locked the index exactly like the
-    // seams above. It is routed through the seam now and probed here so the
-    // regression cannot return through the old call shape.
+  test('roadmap-upgrade applyMigration clean-tree check', (t) => {
+    // applyMigration's `git status --porcelain` runs on the real-run path, so
+    // it is probed like every other seam rather than assumed to inherit the
+    // opt-out.
     //
     // The plan is empty on every field the migration walks, so the function
     // reaches the status check and then does nothing else — the assertion is on

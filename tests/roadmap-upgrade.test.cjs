@@ -387,18 +387,29 @@ describe('roadmap-upgrade clean-tree failure reports its cause (#5048)', () => {
     assert.match(thrown.message, /^git status failed: git status was killed by SIGKILL$/);
   });
 
-  test('a maxBuffer overflow reports ENOBUFS, not "killed by SIGTERM"', (t) => {
+  test('a maxBuffer overflow reports the buffer cause, not a spawn failure and not "killed by SIGTERM"', (t) => {
     // spawnSync shape for stdout over maxBuffer: status null, signal SIGTERM,
-    // error.code ENOBUFS. error must win over signal or the cause is dropped.
+    // error.code ENOBUFS. error must win over signal or the cause is dropped,
+    // and the message must not claim git never started — it did run and was
+    // killed for producing more output than the buffer holds.
     const err = Object.assign(new Error('spawnSync git ENOBUFS'), { code: 'ENOBUFS' });
     const thrown = statusFailureThrows(t, { status: null, stdout: '', stderr: '', signal: 'SIGTERM', error: err });
-    assert.match(thrown.message, /^git status failed: git status failed to start: spawnSync git ENOBUFS$/);
+    assert.match(thrown.message, /^git status failed: spawnSync git ENOBUFS \(output exceeded the buffer\)$/);
   });
 
   test('a git binary that is missing reports the spawn failure, not a bare exit code', (t) => {
     const err = Object.assign(new Error('spawnSync git ENOENT'), { code: 'ENOENT' });
     const thrown = statusFailureThrows(t, { status: null, stdout: '', stderr: 'git: not found', signal: null, error: err });
-    assert.match(thrown.message, /^git status failed: git status failed to start: spawnSync git ENOENT$/);
+    // The code is already in the message, so it is not repeated.
+    assert.match(thrown.message, /^git status failed: spawnSync git ENOENT$/);
+  });
+
+  test('an EPERM kill on kill reports the code, not a claim that git never started', (t) => {
+    // EPERM reaches the error branch with the process already started too, so
+    // it must read the same way ENOBUFS does.
+    const err = Object.assign(new Error('spawnSync git EPERM'), { code: 'EPERM' });
+    const thrown = statusFailureThrows(t, { status: null, stdout: '', stderr: '', signal: 'SIGTERM', error: err });
+    assert.match(thrown.message, /^git status failed: spawnSync git EPERM$/);
   });
 
   test('a genuine non-zero exit still surfaces git stderr verbatim', (t) => {
