@@ -38,8 +38,8 @@ import type { GateResult } from './gate-verdict.cjs';
 import { resolveContainedPath, resolvePhaseDir } from './gate-phase-context.cjs';
 import { escapeEre } from './pattern.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-import phaseIdMod = require('./phase-id.cjs');
-const { stripProjectCodePrefix } = phaseIdMod;
+import planningWorkspaceMod = require('./planning-workspace.cjs');
+const { readScopedConfigValue } = planningWorkspaceMod;
 import { readPlanScanEvidence } from './gate-evidence.cjs';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -192,17 +192,40 @@ function phasePlanPattern(id: string): string | null {
 }
 
 /**
+ * The `<CODE>-` prefix of `planId` when it is EXACTLY the project's configured `project_code`
+ * followed by a dash — the separator included — else null.
+ *
+ * The match is CASE-SENSITIVE and anchored to the configured value. The phase-id module's
+ * `stripProjectCodePrefix` grammar (`^[A-Z][A-Z0-9_]*-(?=\d)`, case-insensitive) recognises ANY
+ * letter prefix, which is deliberately wider than the project: `AUTH-01-02` and `setup-1-2` are
+ * ids this project never assigned a code to, and stripping their prefixes made them resolve
+ * another plan's commits (#5271 Major 1). Only the code the project actually configures may be
+ * stripped, so an id that merely LOOKS coded keeps its literal-match guarantee.
+ */
+function configuredCodePrefix(planId: string, projectCode: string | null): string | null {
+  if (projectCode === null || !/^[A-Z][A-Z0-9_]*$/.test(projectCode)) return null;
+  const prefix = `${projectCode}-`;
+  return planId.startsWith(prefix) ? prefix : null;
+}
+
+/**
  * The anchored subject pattern for a plan id, or null when `planId` is empty, over-long or carries a
  * control / whitespace character.
  *
  * A `<phase>-<plan>` id (`03-01`) is zero-padding tolerant: `feat(03-01):`, `test(3-1):` and
- * `fix(03-01)!:` match, `feat(03-010):` does not. A project-coded id (`PRJ-01-01`, #5271) matches
- * either spelling of the SAME plan — `feat(PRJ-01-01):` and `feat(01-01):` — because the two init
- * verbs hand out different phase tokens for one plan. Any other id (a plan FILE NAME that does not
- * follow the numbering) is matched LITERALLY — every ERE metacharacter escaped — so `x.*` or `a[b]`
- * can only match a commit that names that exact id, and never widens the pattern.
+ * `fix(03-01)!:` match, `feat(03-010):` does not. An id carrying the CONFIGURED project code
+ * (`PRJ-01-01` with `project_code: "PRJ"`, #5271) matches either spelling of the SAME plan —
+ * `feat(PRJ-01-01):` and `feat(01-01):` — because the two init verbs hand out different phase
+ * tokens for one plan. The code is stripped ONLY when it is the configured one: an id like
+ * `AUTH-01-02` or `setup-1-2`, which merely looks coded, is matched LITERALLY — every ERE
+ * metacharacter escaped — so it can only match a commit naming that exact id and never widens the
+ * pattern to another plan's commits. Any other id (a plan FILE NAME that does not follow the
+ * numbering) is matched literally for the same reason.
+ *
+ * `projectCode` is the project's configured `project_code`; with none (no config, no `planningDir`),
+ * every id is matched literally, which is the pre-#5271 behaviour.
  */
-export function planSubjectPattern(planId: string): string | null {
+export function planSubjectPattern(planId: string, projectCode: string | null = null): string | null {
   if (planId.length === 0 || planId.length > 200 || /[\s\x00-\x1f\x7f]/.test(planId)) return null;
   const direct = phasePlanPattern(planId);
   if (direct) return `^[a-z]+\\(${direct}\\)!?:`;
@@ -211,24 +234,32 @@ export function planSubjectPattern(planId: string): string | null {
   // at its FIRST dash leaves `01-01` as the plan half, which is not a plan number, so the id fell
   // through to the literal pattern that no executor commit can ever carry — an empty scope at exit
   // 0, which is the correct answer for a plan that has NOT started and the wrong one for one that
-  // has. Retry on the project-code-stripped id (the phase-id owner owns that prefix grammar) and
-  // make the code OPTIONAL, so the commit the executor actually wrote still matches.
-  const bare = stripProjectCodePrefix(planId);
-  if (bare !== planId) {
-    const coded = phasePlanPattern(bare);
-    if (coded) {
-      // The stripped span INCLUDES the separator dash the owner consumed, so it is interpolated
-      // whole — `PRJ-` — rather than the bare code with a second dash appended.
-      const codePrefix = planId.slice(0, planId.length - bare.length);
-      // The code is a REAL optional group `(PRJ-)?`, never `(?:PRJ-)`: the same string is handed to
-      // `git log --extended-regexp`, and POSIX ERE has no non-capturing group, so `(?:…)` is a syntax
-      // error on the git side while the JS-side `RegExp` (which accepts it) stayed green. The `?`
-      // must follow the GROUP — placed on the escaped `\(` of the subject paren it would merely make
-      // that paren optional.
-      return `^[a-z]+\\((${escapeEre(codePrefix)})?${coded}\\)!?:`;
-    }
+  // has. Retry on the CONFIGURED project-code-stripped id, with the code OPTIONAL so the commit the
+  // executor actually wrote still matches.
+  const prefix = configuredCodePrefix(planId, projectCode);
+  if (prefix !== null) {
+    // The code is a REAL optional group `(PRJ-)?`, never `(?:PRJ-)`: the same string is handed to
+    // `git log --extended-regexp`, and POSIX ERE has no non-capturing group, so `(?:…)` is a syntax
+    // error on the git side while the JS-side `RegExp` (which accepts it) stayed green. The `?`
+    // must follow the GROUP — placed on the escaped `\(` of the subject paren it would merely make
+    // that paren optional.
+    const stripped = planId.slice(prefix.length);
+    const coded = phasePlanPattern(stripped);
+    // Major 3: the milestone-prefixed coded shape `PRJ-01-02-03` strips to `01-02-03`, whose plan
+    // half still carries a dash, so `phasePlanPattern` returns null and the id would fall to the
+    // LITERAL `PRJ-01-02-03` — a spelling no executor commit carries, i.e. a started plan reading
+    // as unstarted. Keep the code group OPTIONAL on the literal fall-through too, so the same id
+    // matches both `feat(PRJ-01-02-03):` and `feat(01-02-03):`.
+    return `^[a-z]+\\((${escapeEre(prefix)})?${coded ?? escapeEre(stripped)}\\)!?:`;
   }
   return `^[a-z]+\\(${escapeEre(planId)}\\)!?:`;
+}
+
+/** The project's configured `project_code`, or null when it is absent, non-string or not a valid code. */
+function configuredProjectCode(projectDir: string): string | null {
+  const { present, value } = readScopedConfigValue(projectDir, ['project_code']);
+  if (!present || typeof value !== 'string' || value.length === 0) return null;
+  return /^[A-Z][A-Z0-9_]*$/.test(value) ? value : null;
 }
 
 // ─── Git plumbing ─────────────────────────────────────────────────────────────
@@ -319,7 +350,7 @@ export function resolveEvaluationScope(projectDir: string, unit: ScopeUnit, opti
     const repoRoot = git(['rev-parse', '--show-toplevel']);
 
     if (unit.kind === 'phase') resolvePhase(projectDir, unit, scope, git, ref, options, repoRoot);
-    else resolveBySubject(unit, scope, git, ref, options, repoRoot);
+    else resolveBySubject(projectDir, unit, scope, git, ref, options, repoRoot);
     return scope;
   } catch (error) {
     const reason = error instanceof ScopeUnreadable ? error.reason : 'resolver-error';
@@ -506,6 +537,7 @@ function resolvePhase(
 }
 
 function resolveBySubject(
+  projectDir: string,
   unit: { kind: 'plan'; planId: string } | { kind: 'quick'; id: string }, scope: EvaluationScope,
   git: Git, ref: string, options: ScopeOptions, repoRoot: string,
 ): void {
@@ -528,7 +560,7 @@ function resolveBySubject(
   const grepArgs: string[] = [];
   let anchored: RegExp | null = null;
   if (unit.kind === 'plan') {
-    const pattern = planSubjectPattern(unit.planId);
+    const pattern = planSubjectPattern(unit.planId, configuredProjectCode(projectDir));
     if (pattern === null) throw new ScopeUnreadable('invalid-plan-id');
     grepArgs.push('--extended-regexp', `--grep=${pattern}`);
     anchored = new RegExp(pattern);

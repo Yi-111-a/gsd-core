@@ -320,6 +320,9 @@ describe('resolveEvaluationScope — plan and quick units', () => {
     // gates' `--plan PRJ-01-01` used to resolve "no-matching-commits" at exit 0 — the honest
     // answer for a plan that has NOT started — for a plan that has.
     const repo = makeRepo();
+    write(repo.dir, '.planning/config.json', JSON.stringify({ project_code: 'PRJ' }));
+    repo.git('add', '.planning/config.json');
+    repo.git('commit', '-m', 'docs(config): set project_code');
     commit(repo, 'src/a.js', 'feat(01-01): a');
     commit(repo, 'src/b.js', 'fix(01-01)!: breaking');
     commit(repo, 'src/c.js', 'feat(01-02): another plan');
@@ -341,15 +344,73 @@ describe('resolveEvaluationScope — plan and quick units', () => {
     );
   });
 
-  test('[regression] a coded plan id matches a commit spelled either way, and no other code (#5271)', () => {
-    const matches = (planId, subject) => new RegExp(planSubjectPattern(planId)).test(subject);
-    assert.ok(matches('PRJ-01-01', 'feat(01-01): a'), 'the executor writes the BARE phase token');
-    assert.ok(matches('PRJ-01-01', 'feat(PRJ-01-01): a'), 'and the coded spelling still resolves');
-    assert.ok(matches('PRJ-01-01', 'fix(PRJ-1-1)!: breaking'), 'zero padding stays tolerant under the code');
-    assert.ok(!matches('PRJ-01-01', 'feat(OTHER-01-01): a'), 'a DIFFERENT project code is a different plan');
-    assert.ok(!matches('PRJ-01-01', 'feat(01-010): a'), 'and the id boundary is unchanged');
-    assert.ok(matches('PROJ_V2-03-01', 'feat(03-01): a'), 'an underscore-bearing code is the project_code grammar');
-    assert.ok(!matches('PRJ-01', 'feat(01): a'), 'a code WITHOUT a plan segment is still matched literally');
+  test('[regression] a coded plan id matches a commit spelled either way (#5271)', () => {
+    const matches = (planId, subject, code) => new RegExp(planSubjectPattern(planId, code)).test(subject);
+    assert.ok(matches('PRJ-01-01', 'feat(01-01): a', 'PRJ'), 'the executor writes the BARE phase token');
+    assert.ok(matches('PRJ-01-01', 'feat(PRJ-01-01): a', 'PRJ'), 'and the coded spelling still resolves');
+    assert.ok(matches('PRJ-01-01', 'fix(PRJ-1-1)!: breaking', 'PRJ'), 'zero padding stays tolerant under the code');
+    assert.ok(!matches('PRJ-01-01', 'feat(OTHER-01-01): a', 'PRJ'), 'a DIFFERENT project code is a different plan');
+    assert.ok(!matches('PRJ-01-01', 'feat(01-010): a', 'PRJ'), 'and the id boundary is unchanged');
+    assert.ok(matches('PROJ_V2-03-01', 'feat(03-01): a', 'PROJ_V2'), 'an underscore-bearing code is the project_code grammar');
+    assert.ok(!matches('PRJ-01-01', 'feat(01-01): a', null), 'with NO configured code the coded id stays literal (#5271 Major 1)');
+  });
+
+  test('[regression] only the CONFIGURED code is stripped; a lookalike id stays literal (#5271)', () => {
+    // The phase-id grammar `^[A-Z][A-Z0-9_]*-(?=\d)`/`i` recognises ANY letter prefix. Stripping it
+    // here made `AUTH-01-02` and `setup-1-2` resolve ANOTHER plan's commits (#5271 Major 1).
+    const matches = (planId, subject) => new RegExp(planSubjectPattern(planId, 'PRJ')).test(subject);
+    assert.ok(matches('AUTH-01-02', 'feat(AUTH-01-02): its own'), 'a different code matches its own commit');
+    assert.ok(!matches('AUTH-01-02', 'feat(01-02): unrelated'), 'and NOT another plan\'s bare commits');
+    assert.ok(!matches('AUTH-01-02', 'feat(1-2):'), 'nor the unpadded spelling');
+    assert.ok(matches('setup-1-2', 'feat(setup-1-2): its own'), 'a hyphenated plan-file id stays literal');
+    assert.ok(!matches('setup-1-2', 'feat(1-2): unrelated'), 'and does not resolve a numbered plan either');
+    assert.ok(matches('setup-1-2', 'feat(01-02): unrelated') === false, 'nor a padded one');
+    assert.ok(!matches('prj-01-01', 'feat(01-01): a'), 'the code match is CASE-SENSITIVE');
+    assert.ok(matches('prj-01-01', 'feat(prj-01-01): a'), 'so a lowercase code is matched literally');
+    assert.ok(!matches('PRJ-01', 'feat(01): a'), 'a code WITHOUT a plan segment stays literal');
+  });
+
+  test('[regression] the milestone-prefixed coded shape resolves both spellings (#5271 Major 3)', () => {
+    // `PRJ-01-02-03` strips to `01-02-03`, whose plan half still carries a dash, so the literal
+    // fall-through previously emitted `PRJ-01-02-03` alone and never the bare spelling.
+    const matches = (planId, subject) => new RegExp(planSubjectPattern(planId, 'PRJ')).test(subject);
+    assert.equal(planSubjectPattern('PRJ-01-02-03', 'PRJ'), '^[a-z]+\\((PRJ-)?01-02-03\\)!?:',
+      'the fall-through literal keeps the OPTIONAL code group, so it is not bare `PRJ-01-02-03`');
+    assert.ok(matches('PRJ-01-02-03', 'feat(PRJ-01-02-03): a'), 'the coded spelling resolves');
+    assert.ok(matches('PRJ-01-02-03', 'feat(01-02-03): a'), 'and so does the BARE spelling, as for every other shape');
+    assert.ok(!matches('PRJ-01-02-03', 'feat(01-02-04): a'), 'but a different sub-phase does not');
+    assert.ok(matches('PRJ-01-01-extra', 'feat(PRJ-01-01-extra): a'), 'a trailing suffix is still literal, and resolves');
+  });
+
+  test('[regression] the coded id matches through REAL git, not only a JS RegExp (#5271 Minor 3)', () => {
+    // git's ERE has no `(?:…)`; the JS-side RegExp accepts it, so only a real `git log` proves the
+    // pattern is well-formed on the side that actually runs it.
+    const repo = makeRepo();
+    write(repo.dir, '.planning/config.json', JSON.stringify({ project_code: 'PRJ' }));
+    repo.git('add', '.planning/config.json');
+    repo.git('commit', '-m', 'docs(config): set project_code');
+    commit(repo, 'src/coded.js', 'feat(PRJ-01-01): coded spelling');
+    commit(repo, 'src/other.js', 'feat(02-01): another phase');
+    const scope = resolveEvaluationScope(repo.dir, { kind: 'plan', planId: 'PRJ-01-01' });
+    assert.equal(scope.source, 'plan-subjects', 'the ERE reached git and matched, so it is not a syntax error');
+    assert.deepEqual(
+      scope.commits.map((c) => c.subject),
+      ['feat(PRJ-01-01): coded spelling'],
+      'the coded commit is found through real git',
+    );
+  });
+
+  test('[regression] a coded id with no commits resolves empty at exit 0 (#5271 Minor 1)', () => {
+    const repo = makeRepo();
+    write(repo.dir, '.planning/config.json', JSON.stringify({ project_code: 'PRJ' }));
+    repo.git('add', '.planning/config.json');
+    repo.git('commit', '-m', 'docs(config): set project_code');
+    commit(repo, 'src/other.js', 'feat(02-01): another phase');
+    for (const planId of ['PRJ-01-09', 'PRJ-1-1', 'PRJ-01-02-03']) {
+      const scope = resolveEvaluationScope(repo.dir, { kind: 'plan', planId });
+      assert.equal(scope.status, 'resolved', `${planId} resolves`);
+      assert.deepEqual(scope.commits, [], `${planId} has no commits of its own`);
+    }
   });
 
   test('[regression] a plan commit that lives only on another branch is not returned', () => {
