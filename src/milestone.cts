@@ -77,12 +77,9 @@ const { syncAndPreserveStateMd, withStateLock, readModifyWriteStateMd, assertVer
 // live-read value, so a crafted value cannot escape `.planning/milestones/`.
 const ARCHIVE_VERSION_LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-// Archive layout contract (#5270 review): the directory name and suffix below
-// are the single source for the `milestones/<label>-phases/` layout.
-// `archivePhaseDirectories` builds the real path from them, and the `phases
-// clear` gate/guard messages render the same layout with the `<label>`
-// placeholder, so a rename in the archiver is a compile-time change at every
-// mirror instead of a silent drift.
+// Archive layout (#5270): the directory name and suffix below are the single
+// source for `archivePhaseDirectories` and for the two `phases clear` messages,
+// which render the same layout with an `<label>` placeholder.
 const PHASES_ARCHIVE_DIR = 'milestones';
 const PHASES_ARCHIVE_SUFFIX = '-phases';
 
@@ -1239,7 +1236,7 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
     // any failure, instead of being lost with the swallowed exception.
     let archivedCount = 0;
     try {
-      const phaseArchiveDir = path.join(archiveDir, `${version}-phases`);
+      const phaseArchiveDir = path.join(archiveDir, `${version}${PHASES_ARCHIVE_SUFFIX}`);
       platformEnsureDir(phaseArchiveDir);
 
       // #3185 (ADR-3180 Decision 1) / #3597: same single routed derivation as
