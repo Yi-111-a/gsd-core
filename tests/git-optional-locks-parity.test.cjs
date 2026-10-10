@@ -21,22 +21,16 @@
  * GIT_OPTIONAL_LOCKS cannot forge a pass and a spawn routed through a variable
  * or a wrapper cannot hide one.
  *
- * Two earlier revisions of this file asserted the same fact by reading `src/`
- * and `hooks/` as text and regex-matching for the variable. Both were source
- * greps, which `RULESET.TESTS.no-source-grep` bans at error level in tests/, and
- * the second was worse than unfashionable: a *comment* naming the variable
- * satisfied the window with no env set at all, and — as the re-review found —
- * the `ROUTED_SPAWN_RE` half that existed to catch spawns "routed through a
- * variable or a wrapper" was never wired into the collection loop, so it
- * exported a claim the file never enforced. That half is gone rather than
- * fixed. What replaces the claim is the two blocks below: a real probe for each
- * named seam, and a real repo where the variable is shown to change what git
- * does. What it does NOT replace is coverage of spawn sites nobody enumerated —
- * see the exclusions list, and read it as the open edge of this guard.
+ * The guard is behavioural: every assertion below watches the options object a
+ * *real* seam hands to `node:child_process`, and the last block runs against a
+ * real repository. Nothing here reads source as text, so neither a comment
+ * naming the variable nor a spawn hidden behind a variable or a wrapper can
+ * pass without the env genuinely reaching the OS. What it does NOT cover is a
+ * spawn site nobody probed — see the exclusions list, and read it as the open
+ * edge of this guard.
  *
- * What replaces the enumeration is the last block, which is the part that
- * actually establishes that the variable is load-bearing: a real repo whose
- * index is stale by stat data alone, run twice, showing that
+ * The last block is the part that establishes the variable is load-bearing: a
+ * real repo whose index is stale by stat data alone, run twice, showing that
  * `GIT_OPTIONAL_LOCKS=0` leaves `.git/index` byte-identical and that the
  * default environment rewrites it. Everything above this line proves the code
  * sets the variable; that block proves setting it changes what git does.
@@ -53,9 +47,12 @@
  *     open the index, so there is no optional write to suppress.
  *   - `hooks/gsd-workflow-guard.js` `branch --show-current` — reads HEAD/refs.
  *   - `hooks/gsd-statusline.js` `rev-list` — walks commit objects.
- *   - `src/check-command-router.ts`, `gate-ui-safety`, `decision-coverage-
+ *   - `src/check-command-router.cts`, `gate-ui-safety`, `decision-coverage-
  *     support` — no git spawn of their own; they delegate to a probed seam.
- *   - `scripts/*.cjs` — repo-development and CI tooling, not shipped runtime.
+ *   - `scripts/*.cjs` — shipped in the npm package (`files` includes `scripts`
+ *     minus a denylist), but their git calls are repo-development and CI
+ *     tooling that never refreshes the index, so there is no optional lock to
+ *     suppress.
  *
  * The exclusion that actually cost a review round was the inverse case:
  * `src/roadmap-upgrade.cts` ran a real index-refreshing `git status` through a

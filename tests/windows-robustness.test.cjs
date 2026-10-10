@@ -271,16 +271,6 @@ describe('bug #685: Windows spawns must set windowsHide:true (no console-window 
     assert.match(region, /windowsHide:\s*true/, 'execGit spawnSync must set windowsHide: true');
   });
 
-  test('roadmap-upgrade spawns git only through the execGit seam', () => {
-    // #5048 moved the `git status --porcelain` precondition off a bare execSync
-    // and onto execGit, which sets windowsHide: true for every call (asserted by
-    // the two execGit tests above). What this guards now is the routing: if a
-    // direct spawn of git is ever reintroduced here it would bypass that seam.
-    const src = read('src/roadmap-upgrade.cts');
-    const direct = src.match(/(?:execSync|execFileSync|spawnSync)\s*\(\s*(?:`|'|")?git\b/g) || [];
-    assert.deepEqual(direct, [], `roadmap-upgrade must spawn git via execGit, not directly:\n${direct.join('\n')}`);
-  });
-
   test('gsd-check-update spawn retains windowsHide (precedent guard)', () => {
     assert.match(read('hooks/gsd-check-update.js'), /windowsHide:\s*true/,
       'gsd-check-update.js must keep windowsHide: true');

@@ -2269,6 +2269,20 @@ function applyMigration(cwd: string, plan: MigrationPlan, options: { dryRun?: bo
     // read-only `git status` the seam change did not reach. shell-free, so no
     // argv quoting or PATH-resolution policy is introduced.
     const result = execGit(['status', '--porcelain'], { cwd, timeout: 10_000 });
+    // #5048: execSync carried the cause on the thrown error. execGit reports a
+    // timeout, a signal or a spawn failure through `timedOut`/`signal`/`error`
+    // with an exit code of `status ?? 1` and an empty stderr, so branch on
+    // those first — otherwise every one of them reads as "git exited 1" and
+    // the cause is dropped. Only a genuine non-zero exit falls through.
+    if (result.timedOut) {
+      throw new Error(`git status timed out after ${10_000} ms`);
+    }
+    if (result.signal) {
+      throw new Error(`git status was killed by ${result.signal}`);
+    }
+    if (result.error) {
+      throw new Error(`git status failed to start: ${result.error.message}`);
+    }
     if (result.exitCode !== 0) {
       throw new Error(result.stderr || `git exited ${result.exitCode}`);
     }
