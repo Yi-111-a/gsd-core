@@ -194,7 +194,6 @@ describe('tdd_mode in init execute-phase JSON output', () => {
   });
 });
 
-
 // ─── #5276 canary: sandboxed seed ignores ambient defaults.json ────────────
 // Positive control: an unsandboxed seed must pick up workflow.tdd_mode from a
 // poisoned ambient home (reachable via HOME and USERPROFILE). The sandboxed
@@ -234,26 +233,72 @@ describe('#5276 homeSandboxEnv canary for tdd_mode defaults', () => {
       !Object.prototype.hasOwnProperty.call(readConfig(seededDir).workflow || {}, 'tdd_mode'),
       'homeSandboxEnv seed must not inherit tdd_mode from ambient defaults.json',
     );
+  });
 
-    // HOME-only while USERPROFILE still points at the poisoned ambient home:
-    // proves the old pattern still leaks on win32 (and remains a canary on
-    // any platform once USERPROFILE is set).
+  // HOME-only while USERPROFILE still points at the poisoned ambient home:
+  // proves the old pattern still leaks on win32, where os.homedir() prefers
+  // USERPROFILE. NOTE: on Linux/macOS os.homedir() uses HOME, so the poisoned
+  // USERPROFILE is ignored there and this leg asserts nothing — it is
+  // win32-only by design (skip below), and the sandboxed assertion above is
+  // the cross-platform contract under test.
+  test('HOME-only seed leaks via USERPROFILE on win32', { skip: process.platform !== 'win32' }, (t) => {
+    const ambientHome = createTempDir('gsd-5276-ambient-home-');
+    t.after(() => cleanup(ambientHome));
+    fs.mkdirSync(path.join(ambientHome, '.gsd'));
+    fs.writeFileSync(
+      path.join(ambientHome, '.gsd', 'defaults.json'),
+      JSON.stringify({ workflow: { tdd_mode: true } }),
+    );
+
     const homeOnlyDir = createTempProject();
     t.after(() => cleanup(homeOnlyDir));
     const homeOnly = withIsolatedProcessState(() => {
       Object.assign(process.env, homeSandboxEnv(ambientHome));
-      return runGsdTools('config-ensure-section', homeOnlyDir, { HOME: homeOnlyDir });
+      return runGsdTools('config-ensure-section', homeOnlyDir, { HOME: homeOnlyDir }); // #5276 HOME-only control: the leak this PR fixes
     });
     assert.ok(homeOnly.success, `HOME-only seed failed: ${homeOnly.error}`);
-    // On platforms where os.homedir() prefers USERPROFILE (win32), HOME-only
-    // still leaks. On Unix HOME wins, so the key stays absent — either way the
-    // sandboxed path above is the contract under test.
-    if (process.platform === 'win32') {
-      assert.strictEqual(
-        readConfig(homeOnlyDir).workflow?.tdd_mode,
-        true,
-        'HOME-only seed must leak via USERPROFILE on win32',
-      );
+    assert.strictEqual(
+      readConfig(homeOnlyDir).workflow?.tdd_mode,
+      true,
+      'HOME-only seed must leak via USERPROFILE on win32',
+    );
+  });
+
+  // The two tests above pin `homeSandboxEnv` itself. This one pins the CALL
+  // SITES: the issue's acceptance names seven seeds across four files, and a
+  // future edit reverting any of them to a bare `{ HOME: dir }` literal would
+  // leave the canary green on every platform. Scoped to the two SEEDING verbs
+  // the issue names — `config-get`/`config-set` and friends read a config the
+  // test already wrote and legitimately pass a bare HOME.
+  test('no #5276 seed site has regressed to a HOME-only env literal', () => {
+    const SEEDING_VERBS = /\b(config-ensure-section|config-new-project)\b/;
+    const CONTROL_MARKER = '#5276 HOME-only control';
+    const files = [
+      'tdd-mode.test.cjs',
+      'code-review-depth.test.cjs',
+      'claude-md-path.test.cjs',
+      'pattern-mapper.test.cjs',
+    ];
+
+    const offenders = [];
+    for (const file of files) {
+      const lines = fs.readFileSync(path.join(__dirname, file), 'utf-8').split('\n');
+      lines.forEach((line, i) => {
+        if (!SEEDING_VERBS.test(line) || line.includes(CONTROL_MARKER)) return;
+        // The env argument belongs to THIS call expression, so walk forward
+        // only as far as its closing `);` — a fixed-width window would reach
+        // into the next call and blame an unrelated seed.
+        const span = [];
+        for (let j = i; j < lines.length; j += 1) {
+          span.push(lines[j]);
+          if (/\);\s*$/.test(lines[j])) break;
+        }
+        if (span.some((l) => /\bHOME\s*:/.test(l) && !/homeSandboxEnv/.test(l))) {
+          offenders.push(`${file}:${i + 1} ${line.trim()}`);
+        }
+      });
     }
+
+    assert.deepStrictEqual(offenders, [], 'seed a HOME-only env; use homeSandboxEnv(dir)');
   });
 });
