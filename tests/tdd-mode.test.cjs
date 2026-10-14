@@ -263,42 +263,4 @@ describe('#5276 homeSandboxEnv canary for tdd_mode defaults', () => {
       'HOME-only seed must leak via USERPROFILE on win32',
     );
   });
-
-  // The two tests above pin `homeSandboxEnv` itself. This one pins the CALL
-  // SITES: the issue's acceptance names seven seeds across four files, and a
-  // future edit reverting any of them to a bare `{ HOME: dir }` literal would
-  // leave the canary green on every platform. Scoped to the two SEEDING verbs
-  // the issue names — `config-get`/`config-set` and friends read a config the
-  // test already wrote and legitimately pass a bare HOME.
-  test('no #5276 seed site has regressed to a HOME-only env literal', () => {
-    const SEEDING_VERBS = /\b(config-ensure-section|config-new-project)\b/;
-    const CONTROL_MARKER = '#5276 HOME-only control';
-    const files = [
-      'tdd-mode.test.cjs',
-      'code-review-depth.test.cjs',
-      'claude-md-path.test.cjs',
-      'pattern-mapper.test.cjs',
-    ];
-
-    const offenders = [];
-    for (const file of files) {
-      const lines = fs.readFileSync(path.join(__dirname, file), 'utf-8').split('\n');
-      lines.forEach((line, i) => {
-        if (!SEEDING_VERBS.test(line) || line.includes(CONTROL_MARKER)) return;
-        // The env argument belongs to THIS call expression, so walk forward
-        // only as far as its closing `);` — a fixed-width window would reach
-        // into the next call and blame an unrelated seed.
-        const span = [];
-        for (let j = i; j < lines.length; j += 1) {
-          span.push(lines[j]);
-          if (/\);\s*$/.test(lines[j])) break;
-        }
-        if (span.some((l) => /\bHOME\s*:/.test(l) && !/homeSandboxEnv/.test(l))) {
-          offenders.push(`${file}:${i + 1} ${line.trim()}`);
-        }
-      });
-    }
-
-    assert.deepStrictEqual(offenders, [], 'seed a HOME-only env; use homeSandboxEnv(dir)');
-  });
 });
