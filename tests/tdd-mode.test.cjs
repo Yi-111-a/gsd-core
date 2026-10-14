@@ -196,7 +196,7 @@ describe('tdd_mode in init execute-phase JSON output', () => {
 
 // ─── #5276 canary: sandboxed seed ignores ambient defaults.json ────────────
 // Positive control: an unsandboxed seed must pick up workflow.tdd_mode from a
-// poisoned ambient home (reachable via HOME and USERPROFILE). The sandboxed
+// poisoned ambient home (reachable via both home variables). The sandboxed
 // seed must leave the key absent from the persisted config.json.
 
 describe('#5276 homeSandboxEnv canary for tdd_mode defaults', () => {
@@ -235,32 +235,7 @@ describe('#5276 homeSandboxEnv canary for tdd_mode defaults', () => {
     );
   });
 
-  // HOME-only while USERPROFILE still points at the poisoned ambient home:
-  // proves the old pattern still leaks on win32, where os.homedir() prefers
-  // USERPROFILE. NOTE: on Linux/macOS os.homedir() uses HOME, so the poisoned
-  // USERPROFILE is ignored there and this leg asserts nothing — it is
-  // win32-only by design (skip below), and the sandboxed assertion above is
-  // the cross-platform contract under test.
-  test('HOME-only seed leaks via USERPROFILE on win32', { skip: process.platform !== 'win32' }, (t) => {
-    const ambientHome = createTempDir('gsd-5276-ambient-home-');
-    t.after(() => cleanup(ambientHome));
-    fs.mkdirSync(path.join(ambientHome, '.gsd'));
-    fs.writeFileSync(
-      path.join(ambientHome, '.gsd', 'defaults.json'),
-      JSON.stringify({ workflow: { tdd_mode: true } }),
-    );
-
-    const homeOnlyDir = createTempProject();
-    t.after(() => cleanup(homeOnlyDir));
-    const homeOnly = withIsolatedProcessState(() => {
-      Object.assign(process.env, homeSandboxEnv(ambientHome));
-      return runGsdTools('config-ensure-section', homeOnlyDir, { HOME: homeOnlyDir }); // #5276 HOME-only control: the leak this PR fixes
-    });
-    assert.ok(homeOnly.success, `HOME-only seed failed: ${homeOnly.error}`);
-    assert.strictEqual(
-      readConfig(homeOnlyDir).workflow?.tdd_mode,
-      true,
-      'HOME-only seed must leak via USERPROFILE on win32',
-    );
-  });
+  // The HOME-only control that still leaks on Windows (os.homedir() does not read
+  // HOME there) lives in tests/tdd-mode.platform.test.cjs, so it runs on
+  // the real-OS conformance lane instead of skipping in the base file.
 });
