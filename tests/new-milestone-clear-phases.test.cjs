@@ -253,6 +253,8 @@ describe('phases clear: uncommitted-changes guard (#1447)', () => {
     assert.match(result.error, /Pass --confirm to proceed/, 'the gate must retain the --confirm follow-up');
     assert.doesNotMatch(result.error, /delet/i, 'the gate message must contain no delete wording');
     assert.doesNotMatch(result.error, /permanently/i, 'the gate message must contain no permanently wording');
+    assert.ok(fs.existsSync(path.join(phase1, 'PLAN.md')), 'the refusal must leave the phase directory in place');
+    assert.strictEqual(findPhasesArchive(tmpDir), null, 'the refusal must not create an archive');
   });
 
   test('#5270 the --confirm gate pluralizes the archive count', () => {
@@ -268,6 +270,10 @@ describe('phases clear: uncommitted-changes guard (#1447)', () => {
     const result = runGsdTools('phases clear', tmpDir);
     assert.ok(!result.success, 'phases clear without --confirm must refuse');
     assert.match(result.error, /would archive 2 phase directories/);
+    for (const name of ['01-foundation', '02-api']) {
+      assert.ok(fs.existsSync(path.join(phasesDir, name, 'PLAN.md')), `the refusal must leave ${name} in place`);
+    }
+    assert.strictEqual(findPhasesArchive(tmpDir), null, 'the refusal must not create an archive');
   });
 
   test('#5270 the --force guard message describes the archive, not a permanent delete', () => {
@@ -283,6 +289,8 @@ describe('phases clear: uncommitted-changes guard (#1447)', () => {
     assert.match(result.error, /\.planning\/milestones\/<label>-phases\//);
     assert.doesNotMatch(result.error, /delet/i, 'the guard message must contain no delete wording');
     assert.doesNotMatch(result.error, /permanently/i, 'the guard message must contain no permanently wording');
+    assert.ok(fs.existsSync(path.join(phase1, 'PLAN.md')), 'the refusal must leave the phase directory in place');
+    assert.strictEqual(findPhasesArchive(tmpDir), null, 'the refusal must not create an archive');
   });
 
   test('succeeds without --force when all phase files are committed', () => {
