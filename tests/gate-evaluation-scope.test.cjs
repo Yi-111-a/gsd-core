@@ -23,6 +23,7 @@ const {
   evaluateEvaluationScope,
   extractTaskCommitRefs,
   planSubjectPattern,
+  qualifiedPlanSubjectPattern,
   isSafeRefArgument,
   SCOPE_EXCLUSION_PATHSPECS,
 } = require('../gsd-core/bin/lib/gate-evaluation-scope.cjs');
@@ -308,7 +309,7 @@ describe('resolveEvaluationScope — plan and quick units', () => {
     assert.equal(planSubjectPattern('x'.repeat(201)), null);
     assert.notEqual(planSubjectPattern('x'.repeat(200)), null);
     // The length bound is on the WHOLE id, so a coded id is refused on the same boundary — the
-    // configured prefix does not buy back the characters it adds (#5271 Minor 3).
+    // configured prefix does not buy back the characters it adds (#5271).
     assert.equal(planSubjectPattern(`PRJ-${'x'.repeat(197)}`, 'PRJ'), null, 'a 201-char coded id');
     assert.notEqual(planSubjectPattern(`PRJ-${'x'.repeat(196)}`, 'PRJ'), null, '200 chars is accepted');
     assert.notEqual(planSubjectPattern(`PRJ-${'x'.repeat(195)}`, 'PRJ'), null, '199 chars is accepted');
@@ -357,12 +358,12 @@ describe('resolveEvaluationScope — plan and quick units', () => {
     assert.ok(!matches('PRJ-01-01', 'feat(OTHER-01-01): a', 'PRJ'), 'a DIFFERENT project code is a different plan');
     assert.ok(!matches('PRJ-01-01', 'feat(01-010): a', 'PRJ'), 'and the id boundary is unchanged');
     assert.ok(matches('PROJ_V2-03-01', 'feat(03-01): a', 'PROJ_V2'), 'an underscore-bearing code is the project_code grammar');
-    assert.ok(!matches('PRJ-01-01', 'feat(01-01): a', null), 'with NO configured code the coded id stays literal (#5271 Major 1)');
+    assert.ok(!matches('PRJ-01-01', 'feat(01-01): a', null), 'with NO configured code the coded id stays literal (#5271)');
   });
 
   test('[regression] only the CONFIGURED code is stripped; a lookalike id stays literal (#5271)', () => {
     // The phase-id grammar `^[A-Z][A-Z0-9_]*-(?=\d)`/`i` recognises ANY letter prefix. Stripping it
-    // here made `AUTH-01-02` and `setup-1-2` resolve ANOTHER plan's commits (#5271 Major 1).
+    // here made `AUTH-01-02` and `setup-1-2` resolve ANOTHER plan's commits (#5271).
     const matches = (planId, subject) => new RegExp(planSubjectPattern(planId, 'PRJ')).test(subject);
     assert.ok(matches('AUTH-01-02', 'feat(AUTH-01-02): its own'), 'a different code matches its own commit');
     assert.ok(!matches('AUTH-01-02', 'feat(01-02): unrelated'), 'and NOT another plan\'s bare commits');
@@ -375,7 +376,7 @@ describe('resolveEvaluationScope — plan and quick units', () => {
     assert.ok(!matches('PRJ-01', 'feat(01): a'), 'a code WITHOUT a plan segment stays literal');
   });
 
-  test('[regression] the milestone-prefixed coded shape resolves both spellings (#5271 Major 3)', () => {
+  test('[regression] the milestone-prefixed coded shape resolves both spellings (#5271)', () => {
     // `PRJ-01-02-03` strips to `01-02-03`, whose plan half still carries a dash, so the literal
     // fall-through previously emitted `PRJ-01-02-03` alone and never the bare spelling.
     const matches = (planId, subject) => new RegExp(planSubjectPattern(planId, 'PRJ')).test(subject);
@@ -387,7 +388,7 @@ describe('resolveEvaluationScope — plan and quick units', () => {
     assert.ok(matches('PRJ-01-01-extra', 'feat(PRJ-01-01-extra): a'), 'a trailing suffix is still literal, and resolves');
   });
 
-  test('[regression] the coded id matches through REAL git, not only a JS RegExp (#5271 Minor 3)', () => {
+  test('[regression] the coded id matches through REAL git, not only a JS RegExp (#5271)', () => {
     // git's ERE has no `(?:…)`; the JS-side RegExp accepts it, so only a real `git log` proves the
     // pattern is well-formed on the side that actually runs it.
     const repo = makeRepo();
@@ -405,7 +406,7 @@ describe('resolveEvaluationScope — plan and quick units', () => {
     );
   });
 
-  test('[regression] a coded id with no commits resolves empty at exit 0 (#5271 Minor 1)', () => {
+  test('[regression] a coded id with no commits resolves empty at exit 0 (#5271)', () => {
     const repo = makeRepo();
     write(repo.dir, '.planning/config.json', JSON.stringify({ project_code: 'PRJ' }));
     repo.git('add', '.planning/config.json');
@@ -418,12 +419,12 @@ describe('resolveEvaluationScope — plan and quick units', () => {
     }
   });
 
-  // #5271 Minor 2: the OPTIONAL code group rode on the bare literal fall-through, so a remainder
+  // #5271: the OPTIONAL code group rode on the bare literal fall-through, so a remainder
   // that is not a plan number kept it and the pattern widened past the pre-#5271 literal.
-  test('[regression] a coded id whose remainder is not a plan number stays literal (#5271 Minor 2)', () => {
+  test('[regression] a coded id whose remainder is not a plan number stays literal (#5271)', () => {
     assert.equal(planSubjectPattern('PRJ-', 'PRJ'), '^[a-z]+\\(PRJ-\\)!?:',
       '`PRJ-` strips to an empty remainder, so the OPTIONAL group would match a bare `feat():`');
-    assert.equal(planSubjectPattern('PRJ-a.b', 'PRJ'), '^[a-z]+\\(PRJ-a\\.b\\\)!?:',
+    assert.equal(planSubjectPattern('PRJ-a.b', 'PRJ'), '^[a-z]+\\(PRJ-a\\.b\\)!?:',
       'a non-numeric remainder keeps the whole id literal, not `(PRJ-)?a\\.b`');
     for (const [planId, subject] of [
       ['PRJ-', 'feat(): a subject no plan assigns'],
@@ -438,9 +439,9 @@ describe('resolveEvaluationScope — plan and quick units', () => {
       'the milestone-prefixed coded shape still takes the group: its remainder starts with the phase number');
   });
 
-  // #5271 Nit 4 / Minor 3: `configuredProjectCode` treats an unsupported grammar as ABSENT. Both
+  // #5271: `configuredProjectCode` treats an unsupported grammar as ABSENT. Both
   // that degradation and an unreadable config must be pinned, not assumed.
-  test('[regression] an unsupported or unreadable project_code leaves coded ids literal (#5271 Nit 4, Minor 3)', () => {
+  test('[regression] an unsupported or unreadable project_code leaves coded ids literal (#5271)', () => {
     const configured = (value) => {
       const repo = makeRepo();
       write(repo.dir, '.planning/config.json', typeof value === 'string' ? value : JSON.stringify({ project_code: value }));
@@ -470,10 +471,10 @@ describe('resolveEvaluationScope — plan and quick units', () => {
     }
   });
 
-  // #5271 Minor 1: hand-picked ids over a fixed fixture read as coverage. The transform's own
+  // #5271: hand-picked ids over a fixed fixture read as coverage. The transform's own
   // invariant is the property: whatever the code and the id, the coded spelling adds exactly the
   // CREDITS of its own commits, and a NON-configured prefix is never a substitute for one.
-  test('[property] a coded id resolves the same subjects as its bare id, plus the coded spelling (#5271 Minor 1)', () => {
+  test('[property] a coded id resolves the same subjects as its bare id, plus the coded spelling (#5271)', () => {
     const pad = (n) => String(n).padStart(2, '0');
     fc.assert(
       fc.property(
@@ -482,6 +483,8 @@ describe('resolveEvaluationScope — plan and quick units', () => {
         fc.integer({ min: 0, max: 40 }),
         fc.stringMatching(/^[A-Z][A-Z0-9_]{0,6}$/),
         (code, phase, plan, otherCode) => {
+          // An "other" code equal to the configured one is the coded spelling itself, not another project's.
+          fc.pre(otherCode !== code);
           const bareId = `${pad(phase)}-${pad(plan)}`;
           const codedId = `${code}-${bareId}`;
           const corpus = [
@@ -815,7 +818,7 @@ describe('resolveEvaluationScope — what a scope says when it finds little', ()
   });
 });
 
-describe('check evaluation-scope — the CLI surface for a coded plan id (#5271 Minor 4)', () => {
+describe('check evaluation-scope — the CLI surface for a coded plan id (#5271)', () => {
   // The unit tests above prove the RESOLVER answers; the four gates that actually read this are
   // shell callers branching on `gsd_run check evaluation-scope`, so the exit code and the JSON on
   // stdout are part of the contract, not an implementation detail of the resolver.
@@ -858,6 +861,8 @@ describe('check evaluation-scope — the CLI surface for a coded plan id (#5271 
     assert.equal(payload.status, 'resolved');
     assert.equal(payload.reason, 'no-matching-commits');
     assert.deepEqual(payload.commits, []);
+    assert.equal(evaluateEvaluationScope({ projectDir: repo.dir, args: ['--plan', 'PRJ-01-09'] }).outcome, 'advisory',
+      'the gate outcome for the empty coded scope is advisory, not pass');
   });
 
   test('an out-of-grammar configured code leaves the coded id LITERAL at the CLI', () => {
@@ -873,5 +878,62 @@ describe('check evaluation-scope — the CLI surface for a coded plan id (#5271 
     assert.equal(res.exitCode, 0, res.stderr);
     assert.equal(JSON.parse(res.stdout).reason, 'no-matching-commits',
       'with no usable configured code the coded id keeps its literal spelling');
+  });
+});
+
+describe('qualifiedPlanSubjectPattern — one builder for every plan-id spelling (#5271, #5177)', () => {
+  // The bare id, the id carrying the configured project code and the workstream-qualified id that
+  // #5177 proposes (`<ws>-<phase>-<plan>`) are three spellings of one grammar. planSubjectPattern
+  // must build the first two through the shared builder; the third has no resolver yet, so it is
+  // driven through the same builder that resolver would call. If planSubjectPattern stops routing
+  // through it, or the builder changes shape for one spelling, the equalities below fail.
+  const fragmentOf = (bareId) => {
+    const m = /^\^\[a-z\]\+\\\((.*)\\\)!\?:$/.exec(planSubjectPattern(bareId));
+    assert.ok(m, `bare pattern for ${bareId} has the subject shape`);
+    return m[1];
+  };
+  const PLAN_NUMBER = fc.integer({ min: 1, max: 120 }).map((n) => String(n).padStart(2, '0'));
+  // A workstream name is a path segment: no `/`, `\` or `..`, and it may carry `.` and `-`.
+  const WORKSTREAM = fc.stringMatching(/^[a-z][a-z0-9_-]{0,6}(\.[a-z0-9]{1,3})?$/);
+
+  test('the bare and coded ids are built by the shared builder', () => {
+    assert.equal(planSubjectPattern('01-01'), qualifiedPlanSubjectPattern('0*1-0*1'));
+    assert.equal(planSubjectPattern('PRJ-01-01', 'PRJ'), qualifiedPlanSubjectPattern('0*1-0*1', 'PRJ'));
+  });
+
+  test('the qualifier group is a real POSIX-ERE capture group and is escaped', () => {
+    assert.equal(qualifiedPlanSubjectPattern('0*1-0*1', 'PRJ'), '^[a-z]+\\((PRJ-)?0*1-0*1\\)!?:');
+    assert.equal(qualifiedPlanSubjectPattern('0*1-0*1', 'ws.b'), '^[a-z]+\\((ws\\.b-)?0*1-0*1\\)!?:');
+    assert.ok(!qualifiedPlanSubjectPattern('0*1-0*1', 'PRJ').includes('(?:'), 'no non-capturing group on the git side');
+  });
+
+  test('[property] bare, coded and workstream-qualified spellings resolve the same plan', () => {
+    fc.assert(fc.property(PLAN_NUMBER, PLAN_NUMBER, WORKSTREAM, (phase, plan, ws) => {
+      const bare = `${phase}-${plan}`;
+      const fragment = fragmentOf(bare);
+      const coded = planSubjectPattern(`PRJ-${bare}`, 'PRJ');
+      assert.equal(coded, qualifiedPlanSubjectPattern(fragment, 'PRJ'), 'coded id goes through the builder');
+      const codedRe = new RegExp(coded);
+      const wsRe = new RegExp(qualifiedPlanSubjectPattern(fragment, ws));
+      for (const re of [codedRe, wsRe]) {
+        assert.ok(re.test(`feat(${bare}): bare spelling`), `${re} accepts the bare spelling`);
+        assert.ok(!re.test(`feat(${phase}-${plan}0): x`), `${re} rejects a longer plan number`);
+      }
+      assert.ok(codedRe.test(`fix(PRJ-${bare})!: coded`), 'coded spelling accepted');
+      assert.ok(wsRe.test(`fix(${ws}-${bare})!: qualified`), 'workstream-qualified spelling accepted');
+      assert.ok(!wsRe.test(`feat(zz${ws}-${bare}): other workstream`), 'another workstream is rejected');
+      if (ws.includes('.')) {
+        assert.ok(!wsRe.test(`feat(${ws.replace('.', 'X')}-${bare}): x`), 'a `.` in the name is literal');
+      }
+    }), { numRuns: 100 });
+  });
+
+  test('a workstream-qualified pattern from the builder is valid for real git', () => {
+    const repo = makeRepo();
+    commit(repo, 'src/b.js', 'feat(ws.b-01-01): qualified spelling');
+    commit(repo, 'src/bare.js', 'feat(01-01): bare spelling');
+    commit(repo, 'src/a.js', 'feat(wsXb-01-01): another workstream');
+    const out = repo.git('log', '--extended-regexp', `--grep=${qualifiedPlanSubjectPattern('0*1-0*1', 'ws.b')}`, '--format=%s');
+    assert.deepEqual(out.split('\n').filter(Boolean).sort(), ['feat(01-01): bare spelling', 'feat(ws.b-01-01): qualified spelling']);
   });
 });
