@@ -194,14 +194,29 @@ function phasePlanPattern(id: string): string | null {
 }
 
 /**
+ * The anchored subject pattern for a `<phase>-<plan>` ERE fragment, optionally behind one scope
+ * qualifier as the group `(<qualifier>-)?`.
+ *
+ * Every spelling of a plan id goes through this one builder: the bare id, the id carrying the
+ * configured project code (#5271), and the workstream-qualified id `<ws>-<phase>-<plan>` that #5177
+ * proposes. The qualifier is ERE-escaped, so a workstream name (a path segment, not a project-code
+ * token) is matched literally. The group is a real capture group, never `(?:…)`: the pattern goes
+ * to `git log --extended-regexp`, and POSIX ERE has no non-capturing group.
+ */
+export function qualifiedPlanSubjectPattern(fragment: string, qualifier: string | null = null): string {
+  const group = qualifier === null ? '' : `(${escapeEre(qualifier)}-)?`;
+  return `^[a-z]+\\(${group}${fragment}\\)!?:`;
+}
+
+/**
  * The `<CODE>-` prefix of `planId` when it is EXACTLY the project's configured `project_code`
  * followed by a dash — the separator included — else null.
  *
  * The match is CASE-SENSITIVE and anchored to the configured value. The phase-id module's
- * `stripProjectCodePrefix` grammar (`^[A-Z][A-Z0-9_]*-(?=\d)`, case-insensitive) recognises ANY
+ * `stripProjectCodePrefix` grammar (case-insensitive, any code before a digit) recognises ANY
  * letter prefix, which is deliberately wider than the project: `AUTH-01-02` and `setup-1-2` are
  * ids this project never assigned a code to, and stripping their prefixes made them resolve
- * another plan's commits (#5271 Major 1). Only the code the project actually configures may be
+ * another plan's commits (#5271). Only the code the project actually configures may be
  * stripped, so an id that merely LOOKS coded keeps its literal-match guarantee.
  */
 function configuredCodePrefix(planId: string, projectCode: string | null): string | null {
@@ -230,7 +245,7 @@ function configuredCodePrefix(planId: string, projectCode: string | null): strin
 export function planSubjectPattern(planId: string, projectCode: string | null = null): string | null {
   if (planId.length === 0 || planId.length > 200 || /[\s\x00-\x1f\x7f]/.test(planId)) return null;
   const direct = phasePlanPattern(planId);
-  if (direct) return `^[a-z]+\\(${direct}\\)!?:`;
+  if (direct) return qualifiedPlanSubjectPattern(direct);
   // #5271: `init.execute-phase` returns `phase_number: "PRJ-01"` where `init.plan-phase` returns
   // `padded_phase: "01"`, and every gate builds its `--plan` from the former. Splitting `PRJ-01-01`
   // at its FIRST dash leaves `01-01` as the plan half, which is not a plan number, so the id fell
@@ -239,30 +254,26 @@ export function planSubjectPattern(planId: string, projectCode: string | null = 
   // has. Retry on the CONFIGURED project-code-stripped id, with the code OPTIONAL so the commit the
   // executor actually wrote still matches.
   //
-  // Two properties the branch below must keep, and the reasoning behind them (the #5177-shaped
-  // grammar history, and why `(?:…)` is unusable here) is in the PR thread:
-  //   1. the group is a REAL POSIX-ERE capture group `(PRJ-)?` — `git log --extended-regexp` has no
-  //      non-capturing group, so `(?:…)` is a git-side syntax error the JS-side `RegExp` swallows;
-  //   2. the group rides ONLY on a remainder that could be a plan number, so an empty or
-  //      non-numeric remainder keeps the whole id literal — never WIDER than the pre-#5271 pattern.
+  // The `(PRJ-)?` group comes from `qualifiedPlanSubjectPattern`, and it rides ONLY on a remainder
+  // that could be a plan number, so an empty or non-numeric remainder keeps the whole id literal —
+  // never WIDER than the pre-#5271 pattern.
   const prefix = configuredCodePrefix(planId, projectCode);
   if (prefix !== null) {
     const stripped = planId.slice(prefix.length);
     const coded = phasePlanPattern(stripped);
     const planShaped = coded !== null || /^\d/.test(stripped);
-    if (!planShaped) return `^[a-z]+\\(${escapeEre(planId)}\\)!?:`;
-    // The `(PRJ-)?` group comes from the phase-id grammar owner, not from a second copy here, so
-    // this reader, a `#5177` workstream-qualified id and `config-set`'s acceptance cannot disagree.
-    return `^[a-z]+\\(${phaseIdMod.optionalProjectCodeGroupSource(projectCode!)}${coded ?? escapeEre(stripped)}\\)!?:`;
+    if (!planShaped) return qualifiedPlanSubjectPattern(escapeEre(planId));
+    return qualifiedPlanSubjectPattern(coded ?? escapeEre(stripped), projectCode);
   }
-  return `^[a-z]+\\(${escapeEre(planId)}\\)!?:`;
+  return qualifiedPlanSubjectPattern(escapeEre(planId));
 }
 
 /**
  * The project's configured `project_code`, or null when it is absent, non-string or outside the
  * supported grammar.
  *
- * SUPPORTED GRAMMAR: `PROJECT_CODE_VALUE_RE` (`^[A-Z][A-Z0-9_]*$`) — the phase-id owner's one
+ * SUPPORTED GRAMMAR: `PROJECT_CODE_VALUE_RE` (an uppercase letter, then uppercase letters, digits
+ * or `_`) — the phase-id owner's one
  * grammar, the same half of the `project_code` value `.planning/config.json` documents. `config-set`
  * stores `project_code` unvalidated, so a lowercase (`prj`) or hyphenated (`AUTH-X`) value is
  * possible; such a value is treated as ABSENT rather than matched with a second, wider grammar,
@@ -270,8 +281,6 @@ export function planSubjectPattern(planId: string, projectCode: string | null = 
  * that project. That degradation is the safe direction — never WIDER than the pre-#5271 pattern,
  * since a literal id can only match a subject naming that exact id — but it is a real limit:
  * a project that configures a code outside the supported grammar does not get coded-id resolution.
- * The supported grammar is `PROJECT_CODE_VALUE_RE`, `^[A-Z][A-Z0-9_]*$`; every other `project_code`
- * value keeps the literal behaviour.
  */
 function configuredProjectCode(projectDir: string): string | null {
   const { present, value } = readScopedConfigValue(projectDir, ['project_code']);
