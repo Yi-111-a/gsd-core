@@ -1342,12 +1342,11 @@ function cmdPhasesClear(cwd: string, raw: boolean, args: string[]): void {
     const entries = fs.readdirSync(phasesDir, { withFileTypes: true });
     // #3185 (ADR-3180 Decision 1): this carried the FIFTH copy of the
     // sentinel rule and its THIRD regex variant — `/^999(?:\.|$)/` — which
-    // excluded 999 but NOT 0. Because this was the DESTRUCTIVE path, that
-    // divergence meant a `0-*` directory `roadmap analyze` preserves as a
-    // sentinel was DELETED here. Since #1871 this path archives instead, so
-    // the same divergence would misfile, not remove. Routed through the
-    // canonical predicate so every reader of "is this a sentinel phase"
-    // agrees by construction.
+    // excluded 999 but NOT 0. That divergence meant a `0-*` directory
+    // `roadmap analyze` preserves as a sentinel was swept into the clear
+    // here (moved into the archive, since #1871) instead of being kept.
+    // Routed through the canonical predicate so every reader of "is this a
+    // sentinel phase" agrees by construction.
     // #3639: the DIR-AWARE recognizer — the convention-less id predicate
     // never saw bracket sentinel dirs (GSD.999-07-icebox), so they were
     // counted for removal here while the disk guards (post-#3639) preserve
