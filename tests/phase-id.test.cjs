@@ -1699,10 +1699,17 @@ describe('phase-id: the project_code value grammar (#5271)', () => {
 
   test('[property] a value is a project code iff it is a strippable prefix of a coded phase id', () => {
     // The value grammar and the prefix strip are built from one class, so a value is accepted
-    // exactly when `<value>-01` strips to `01`.
-    fc.assert(fc.property(fc.string({ maxLength: 12 }), (s) => {
-      if (s.includes('-')) return;
-      assert.equal(PROJECT_CODE_VALUE_RE.test(s), phaseId.stripProjectCodePrefix(`${s}-01`, false) === '01');
-    }), { numRuns: 200 });
+    // exactly when `<value>-01` strips to `01`. Mixed generator so both accept and reject sides
+    // are exercised (pure printable ASCII almost never hits a valid longer code).
+    fc.assert(fc.property(
+      fc.oneof(
+        fc.stringMatching(/^[A-Z][A-Z0-9_]{0,11}$/),
+        fc.string({ maxLength: 12 }),
+      ),
+      (s) => {
+        if (s.includes('-')) return;
+        assert.equal(PROJECT_CODE_VALUE_RE.test(s), phaseId.stripProjectCodePrefix(`${s}-01`, false) === '01');
+      },
+    ), { numRuns: 200 });
   });
 });

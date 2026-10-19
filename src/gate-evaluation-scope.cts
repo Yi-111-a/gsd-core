@@ -272,15 +272,14 @@ export function planSubjectPattern(planId: string, projectCode: string | null = 
  * The project's configured `project_code`, or null when it is absent, non-string or outside the
  * supported grammar.
  *
- * SUPPORTED GRAMMAR: `PROJECT_CODE_VALUE_RE` (an uppercase letter, then uppercase letters, digits
- * or `_`) — the phase-id owner's one
- * grammar, the same half of the `project_code` value `.planning/config.json` documents. `config-set`
- * stores `project_code` unvalidated, so a lowercase (`prj`) or hyphenated (`AUTH-X`) value is
- * possible; such a value is treated as ABSENT rather than matched with a second, wider grammar,
- * which means the coded id falls back to its LITERAL spelling and #5271's symptom reappears for
- * that project. That degradation is the safe direction — never WIDER than the pre-#5271 pattern,
- * since a literal id can only match a subject naming that exact id — but it is a real limit:
- * a project that configures a code outside the supported grammar does not get coded-id resolution.
+ * SUPPORTED GRAMMAR: `PROJECT_CODE_VALUE_RE`, the phase-id owner's grammar (an uppercase letter,
+ * then uppercase letters, digits or `_`). `config-set` stores `project_code` unvalidated, so a
+ * lowercase (`prj`) or hyphenated (`AUTH-X`) value is possible; such a value is treated as ABSENT
+ * rather than matched with a second, wider grammar, which means the coded id falls back to its
+ * LITERAL spelling and #5271's symptom reappears for that project. That degradation is the safe
+ * direction — never WIDER than the pre-#5271 pattern, since a literal id can only match a subject
+ * naming that exact id — but it is a real limit: a project that configures a code outside the
+ * supported grammar does not get coded-id resolution.
  */
 function configuredProjectCode(projectDir: string): string | null {
   const { present, value } = readScopedConfigValue(projectDir, ['project_code']);
