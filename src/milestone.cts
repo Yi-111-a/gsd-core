@@ -27,7 +27,7 @@ import auditMod = require('./audit.cjs');
 const { resolveQuickTaskSummaryFile } = auditMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import ioMod = require('./io.cjs');
-const { output, error } = ioMod;
+const { output, error, ERROR_REASON } = ioMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import cliExitMod = require('./cli-exit.cjs');
 const { ExitError } = cliExitMod;
@@ -51,7 +51,7 @@ import planningScopeMod = require('./planning-scope.cjs');
 const { SCOPE } = planningScopeMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import coreUtilsMod = require('./core-utils.cjs');
-const { extractOneLinerFromBody, countMatchedSummaries } = coreUtilsMod;
+const { extractOneLinerFromBody, countMatchedSummaries, toPosixPath } = coreUtilsMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- plan-scan.cjs is an export= CommonJS module
 import planScanMod = require('./plan-scan.cjs');
 const { scanPhasePlans } = planScanMod;
@@ -79,7 +79,8 @@ const ARCHIVE_VERSION_LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 // Archive layout (#5270): the directory name and suffix below are the single
 // source for `archivePhaseDirectories` and for the two `phases clear` messages,
-// which render the same layout with an `<label>` placeholder.
+// which render the same layout (under the active planning root) with a
+// `<label>` placeholder.
 const PHASES_ARCHIVE_DIR = 'milestones';
 const PHASES_ARCHIVE_SUFFIX = '-phases';
 
@@ -1353,10 +1354,19 @@ function cmdPhasesClear(cwd: string, raw: boolean, args: string[]): void {
     // them; the archive path must not be the one blind reader left.
     const dirs = entries.filter((e) => e.isDirectory() && !isSentinelPhaseDir(e.name));
 
+    // #5270: the archive root follows planningPaths(cwd), which differs from
+    // `.planning/` under an active workstream or project, so the messages
+    // render the real root relative to cwd. The label stays a placeholder:
+    // it is resolved at archive time and can change before the re-run.
+    const archiveRootRel = toPosixPath(path.relative(cwd, path.join(planningPaths(cwd).planning, PHASES_ARCHIVE_DIR)));
+    const archiveDestDisplay = `${archiveRootRel}/<label>${PHASES_ARCHIVE_SUFFIX}/`;
+
     if (dirs.length > 0 && !confirm) {
       error(
         `phases clear would archive ${dirs.length} phase director${dirs.length === 1 ? 'y' : 'ies'} to ` +
-          `.planning/${PHASES_ARCHIVE_DIR}/<label>${PHASES_ARCHIVE_SUFFIX}/. Pass --confirm to proceed.`,
+          `${archiveDestDisplay}. Pass --confirm to proceed.`,
+        ERROR_REASON.PHASES_CLEAR_CONFIRM_REQUIRED,
+        { phase_dirs: dirs.length, archive_root: archiveRootRel },
       );
     }
 
@@ -1396,7 +1406,9 @@ function cmdPhasesClear(cwd: string, raw: boolean, args: string[]): void {
           `phases clear aborted: ${uncommittedLines.length} uncommitted change${uncommittedLines.length === 1 ? '' : 's'} detected in phase directories. ` +
             `Archive or commit outgoing phase work before running this command, ` +
             `or pass --force to skip this check; the directories, uncommitted changes included, ` +
-            `are archived under .planning/${PHASES_ARCHIVE_DIR}/<label>${PHASES_ARCHIVE_SUFFIX}/. (#1447, #1871)`,
+            `are archived under ${archiveDestDisplay}. (#1447, #1871)`,
+          ERROR_REASON.PHASES_CLEAR_UNCOMMITTED_CHANGES,
+          { uncommitted_changes: uncommittedLines.length, archive_root: archiveRootRel },
         );
       }
     }
