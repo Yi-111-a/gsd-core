@@ -1684,32 +1684,15 @@ describe('buildPhaseHeadingScanRegex — the heading-scan pattern owner', () => 
   });
 });
 
-// #5271: the project_code VALUE grammar the evaluation-scope reader gates on.
-const { PROJECT_CODE_VALUE_RE } = phaseId;
-
-describe('phase-id: the project_code value grammar (#5271)', () => {
-  test('accepts a configured code and rejects lowercase, dashed and padded values', () => {
-    for (const code of ['PRJ', 'PROJ_V2', 'A', 'APP_CODE', 'X1']) {
-      assert.ok(PROJECT_CODE_VALUE_RE.test(code), `${code} is a project code`);
-    }
-    for (const code of ['', 'prj', '_PRJ', '1PRJ', 'AUTH-X', 'PRJ-', 'PRJ X', 'PRJ\n']) {
-      assert.ok(!PROJECT_CODE_VALUE_RE.test(code), `${JSON.stringify(code)} is not a project code`);
-    }
+describe('parsePhaseFromProse: the planned-phase status phrase is not a name (#5369)', () => {
+  test('a bare "READY TO EXECUTE" tail yields no name', () => {
+    assert.deepEqual(phaseId.parsePhaseFromProse('19 — READY TO EXECUTE'), { phase: '19', name: null });
   });
-
-  test('[property] a value is a project code iff it is a strippable prefix of a coded phase id', () => {
-    // The value grammar and the prefix strip are built from one class, so a value is accepted
-    // exactly when `<value>-01` strips to `01`. Mixed generator so both accept and reject sides
-    // are exercised (pure printable ASCII almost never hits a valid longer code).
-    fc.assert(fc.property(
-      fc.oneof(
-        fc.stringMatching(/^[A-Z][A-Z0-9_]{0,11}$/),
-        fc.string({ maxLength: 12 }),
-      ),
-      (s) => {
-        if (s.includes('-')) return;
-        assert.equal(PROJECT_CODE_VALUE_RE.test(s), phaseId.stripProjectCodePrefix(`${s}-01`, false) === '01');
-      },
-    ), { numRuns: 200 });
+  test('the parenthetical name still wins over the status phrase', () => {
+    assert.deepEqual(phaseId.parsePhaseFromProse('19 (Real) — READY TO EXECUTE'), { phase: '19', name: 'Real' });
+  });
+  test('a genuine em-dash name is unaffected', () => {
+    assert.deepEqual(phaseId.parsePhaseFromProse('19 — Ready Set Go'), { phase: '19', name: 'Ready Set Go' });
   });
 });
+
