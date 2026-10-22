@@ -214,7 +214,7 @@ test('stats does not list a phase-0 sentinel directory', (t) => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════
-// Row 43 — the destructive path: `phases clear` must not sweep a sentinel
+// Row 43 — the archive path: `phases clear` must not sweep a sentinel
 // ═════════════════════════════════════════════════════════════════════════
 
 test('phases clear preserves a phase-0 sentinel directory, with negative proof on disk', (t) => {

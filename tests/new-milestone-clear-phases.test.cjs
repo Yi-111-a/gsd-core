@@ -185,12 +185,11 @@ describe('phases clear: uncommitted-changes guard (#1447)', () => {
     fs.writeFileSync(path.join(phase1, 'PLAN.md'), '# Plan (uncommitted)');
     // Do NOT commit — leave as untracked/uncommitted changes
 
-    const result = runGsdTools('phases clear --confirm', tmpDir);
+    const result = runGsdTools(['--json-errors', 'phases', 'clear', '--confirm'], tmpDir);
     assert.ok(!result.success, 'phases clear should fail when uncommitted changes exist');
-    assert.ok(
-      result.error.includes('uncommitted') || result.error.includes('aborted'),
-      `expected error about uncommitted changes, got: ${result.error}`
-    );
+    const envelope = JSON.parse(result.error);
+    assert.strictEqual(envelope.ok, false);
+    assert.strictEqual(envelope.reason, ERROR_REASON.PHASES_CLEAR_UNCOMMITTED_CHANGES);
     // Phase directory must still exist (left in place, not archived)
     assert.ok(fs.existsSync(phase1), 'phase directory must survive when guard fires');
   });
@@ -203,12 +202,11 @@ describe('phases clear: uncommitted-changes guard (#1447)', () => {
     // Stage the file but do not commit
     gitOrThrow(['add', '.planning/phases/'], { cwd: tmpDir });
 
-    const result = runGsdTools('phases clear --confirm', tmpDir);
+    const result = runGsdTools(['--json-errors', 'phases', 'clear', '--confirm'], tmpDir);
     assert.ok(!result.success, 'phases clear should fail when staged-but-uncommitted changes exist');
-    assert.ok(
-      result.error.includes('uncommitted') || result.error.includes('aborted'),
-      `expected error about uncommitted changes, got: ${result.error}`
-    );
+    const envelope = JSON.parse(result.error);
+    assert.strictEqual(envelope.ok, false);
+    assert.strictEqual(envelope.reason, ERROR_REASON.PHASES_CLEAR_UNCOMMITTED_CHANGES);
     assert.ok(fs.existsSync(phase1), 'phase directory must survive when guard fires');
   });
 
