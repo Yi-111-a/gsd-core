@@ -67,7 +67,7 @@ import planningScopeMod = require('./planning-scope.cjs');
 const { SCOPE } = planningScopeMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- roadmap-parser.cjs is an export= CommonJS module
 import roadmapParserMod = require('./roadmap-parser.cjs');
-const { stripShippedMilestones, extractCurrentMilestone, currentMilestoneRawRanges, withPhaseSection, findMilestoneScopeHeadingLines } = roadmapParserMod;
+const { stripShippedMilestones, extractCurrentMilestone, currentMilestoneRawRanges, withPhaseSection, editOutsideShippedBlocks, findMilestoneScopeHeadingLines } = roadmapParserMod;
 // #4129: the single owner of "count the ROADMAP's milestone Complete rows"
 // (pure computation, no I/O — no cycle on this path) for the intent-first
 // progress counters the phase-complete transaction passes downstream.
@@ -4324,7 +4324,13 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
               + roadmapContent.slice(w.end);
           }
         } else {
-          roadmapContent = mutateMilestonePhase(roadmapContent);
+          // #5543: the active milestone could not be resolved (no STATE
+          // `milestone:`, no marker). Writing the whole document would let
+          // `withPhaseSection` pick the first `### Phase N:` in document order,
+          // which can sit inside a shipped `<details>` block. Hide the shipped
+          // blocks from the mutation and restore them untouched; a ROADMAP with
+          // no shipped block is mutated whole, as before.
+          roadmapContent = editOutsideShippedBlocks(roadmapContent, mutateMilestonePhase);
         }
 
         writes.push({
