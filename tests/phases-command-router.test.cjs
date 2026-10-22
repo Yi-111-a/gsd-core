@@ -4,6 +4,7 @@ const { describe, test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 
 const { routePhasesCommand } = require('../gsd-core/bin/lib/phases-command-router.cjs');
+const { ERROR_REASON } = require('../gsd-core/bin/lib/io.cjs');
 
 // These tests exercise router dispatch with a deterministic runtime context.
 let _prevWorkstream;
@@ -136,13 +137,12 @@ describe('bug #1826: phases clear --confirm guard', () => {
     fs.mkdirSync(path.join(phasesDir, '01-foundation'), { recursive: true });
     fs.mkdirSync(path.join(phasesDir, '02-api'), { recursive: true });
 
-    const result = runGsdTools(['phases', 'clear'], tmpDir);
+    const result = runGsdTools(['--json-errors', 'phases', 'clear'], tmpDir);
 
     assert.ok(!result.success, 'should exit non-zero when dirs exist and --confirm absent');
-    assert.ok(
-      result.error.includes('--confirm'),
-      `error message must mention --confirm; got: ${result.error}`
-    );
+    const envelope = JSON.parse(result.error);
+    assert.strictEqual(envelope.ok, false);
+    assert.strictEqual(envelope.reason, ERROR_REASON.PHASES_CLEAR_CONFIRM_REQUIRED);
 
     // Dirs must be untouched
     assert.ok(fs.existsSync(path.join(phasesDir, '01-foundation')), 'dirs must not be archived away');
