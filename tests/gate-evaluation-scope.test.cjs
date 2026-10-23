@@ -373,7 +373,7 @@ describe('resolveEvaluationScope — plan and quick units', () => {
     assert.ok(!matches('setup-1-2', 'feat(01-02): unrelated'), 'nor a padded one');
     assert.ok(!matches('prj-01-01', 'feat(01-01): a'), 'the code match is CASE-SENSITIVE');
     assert.ok(matches('prj-01-01', 'feat(prj-01-01): a'), 'so a lowercase code is matched literally');
-    assert.ok(!matches('PRJ-01', 'feat(01): a'), 'a code WITHOUT a plan segment stays literal');
+    assert.ok(!matches('PRJ-01', 'feat(01): a'), 'a code WITHOUT a plan segment takes the direct split (phase PRJ, plan 01), so it never strips the code');
   });
 
   test('[regression] the milestone-prefixed coded shape resolves both spellings (#5271)', () => {
