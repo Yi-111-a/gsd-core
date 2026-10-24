@@ -84,6 +84,11 @@ const ARCHIVE_VERSION_LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const PHASES_ARCHIVE_DIR = 'milestones';
 const PHASES_ARCHIVE_SUFFIX = '-phases';
 
+/** Absolute archive root for `cwd`: `<active planning root>/milestones`. */
+function phasesArchiveRoot(cwd: string): string {
+  return path.join(planningPaths(cwd).planning, PHASES_ARCHIVE_DIR);
+}
+
 interface MilestoneCompleteOptions {
   name?: string;
   force?: boolean;
@@ -1358,7 +1363,7 @@ function cmdPhasesClear(cwd: string, raw: boolean, args: string[]): void {
     // `.planning/` under an active workstream or project, so the messages
     // render the real root relative to cwd. The label stays a placeholder:
     // it is resolved at archive time and can change before the re-run.
-    const archiveRootRel = toPosixPath(path.relative(cwd, path.join(planningPaths(cwd).planning, PHASES_ARCHIVE_DIR)));
+    const archiveRootRel = toPosixPath(path.relative(cwd, phasesArchiveRoot(cwd)));
     const archiveDestDisplay = `${archiveRootRel}/<label>${PHASES_ARCHIVE_SUFFIX}/`;
 
     if (dirs.length > 0 && !confirm) {
@@ -1479,7 +1484,7 @@ function archivePhaseDirectories(cwd: string, phasesDir: string, dirs: ReadonlyA
   if (!archiveVersion) {
     archiveVersion = `archived-${new Date().toISOString().replace(/[-:T]/g, '').slice(0, 8)}`;
   }
-  const archivePhasesDir = path.join(planningPaths(cwd).planning, PHASES_ARCHIVE_DIR, `${archiveVersion}${PHASES_ARCHIVE_SUFFIX}`);
+  const archivePhasesDir = path.join(phasesArchiveRoot(cwd), `${archiveVersion}${PHASES_ARCHIVE_SUFFIX}`);
   platformEnsureDir(archivePhasesDir);
   let archived = 0;
   for (const entry of dirs) {

@@ -196,9 +196,9 @@ caller, byte-identical to pre-#3912 behavior. See
   `ExitError(exitCodeFor(<mapped outcome>))` instead of a hardcoded `1` — so, for example, a call
   with `ERROR_REASON.SDK_MISSING_ARG` or `ERROR_REASON.SDK_UNKNOWN_COMMAND` exits `64` (`USAGE`)
   under `v2`, and one with `ERROR_REASON.CONFIG_KEY_NOT_FOUND` exits `66` (`NO_INPUT`).
-- **Most call sites are unaffected either way.** 226 of the 278 `error()` call sites in the repo
-  pass no `reason` at all, defaulting to `ERROR_REASON.UNKNOWN`, which maps to the generic `FAIL`
-  outcome (exit `1`) under both versions.
+- **Most call sites are unaffected either way.** The bulk of the `error()` call sites in the
+  repo pass no `reason` at all, defaulting to `ERROR_REASON.UNKNOWN`, which maps to the generic
+  `FAIL` outcome (exit `1`) under both versions.
 
 ### `output({ error: … })` — a degraded result is also a declared outcome
 
