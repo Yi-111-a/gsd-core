@@ -10854,7 +10854,8 @@ function reportLocalPatches(configDir, runtime = DEFAULT_RUNTIME) {
   if (meta.files && meta.files.length > 0) {
     const reapplyCommand = hostBehaviorsFor(runtime).reapplyCommand || '/gsd-update --reapply';
     console.log('');
-    console.log('  ' + yellow + 'Local patches detected' + reset + ' (from v' + meta.from_version + '):');
+    const fromLabel = meta.from_version ? ' (from v' + meta.from_version + ')' : ' (from a first install)';
+    console.log('  ' + yellow + 'Local patches detected' + reset + fromLabel + ':');
     for (const f of meta.files) {
       console.log('     ' + cyan + f + reset);
     }
@@ -10865,6 +10866,114 @@ function reportLocalPatches(configDir, runtime = DEFAULT_RUNTIME) {
     console.log('');
   }
   return meta.files || [];
+}
+
+/**
+ * #5522: the first-time baseline reports a user's `skills/gsd-<stem>/SKILL.md` as preserved, but the
+ * skills writer owns a dir by its first-party name and replaces it. Before the writers run, set aside a copy of
+ * every baseline-preserved file in the shipped-name namespaces (bounded to BASELINE_SNAPSHOT_MAX_BYTES) in
+ * gsd-migration-backups/ — an installer-internal dir, so it can never collide with a user's existing
+ * gsd-local-patches/ content — so the user's content is on disk before anything can replace it.
+ * backUpReplacedBaselineFiles then moves the copies of replaced files into gsd-local-patches/.
+ * Returns Map<relPath, { fullPath, content, stagedPath }>.
+ */
+const BASELINE_SNAPSHOT_MAX_BYTES = 1024 * 1024;
+const BASELINE_SNAPSHOT_DIR = path.join('gsd-migration-backups', 'first-install-5522');
+const SHIPPED_NAME_NAMESPACE = /^(skills|commands?)\/gsd([-/]|$)/;
+function snapshotBaselinePreservedFiles(configDir, migrationResult) {
+  const snapshots = new Map();
+  const plan = migrationResult && migrationResult.plan;
+  const actions = plan && Array.isArray(plan.actions) ? plan.actions : [];
+  const stagingDir = path.join(configDir, BASELINE_SNAPSHOT_DIR);
+  for (const action of actions) {
+    if (!action || action.type !== 'baseline-preserve-user' || typeof action.relPath !== 'string') continue;
+    const ref = resolveInstallRelativePath(configDir, action.relPath);
+    if (!ref || !SHIPPED_NAME_NAMESPACE.test(ref.relPath)) continue;
+    try {
+      const st = fs.lstatSync(ref.fullPath);
+      if (!st.isFile()) continue;
+      if (st.size > BASELINE_SNAPSHOT_MAX_BYTES) {
+        console.warn(`  ${yellow}⚠${reset}  ${action.relPath} is larger than ${BASELINE_SNAPSHOT_MAX_BYTES} bytes, so it is not copied aside; if the install replaces it, the original is not kept`);
+        continue;
+      }
+      const content = fs.readFileSync(ref.fullPath);
+      const stagedRef = resolveInstallRelativePath(stagingDir, ref.relPath);
+      if (!stagedRef) continue;
+      fs.mkdirSync(path.dirname(stagedRef.fullPath), { recursive: true });
+      fs.writeFileSync(stagedRef.fullPath, content);
+      snapshots.set(ref.relPath, { fullPath: ref.fullPath, content, stagedPath: stagedRef.fullPath });
+    } catch (err) {
+      console.warn(`  ${yellow}⚠${reset}  Could not set aside ${action.relPath} before install (${err.message}); if the install replaces it, the original is not kept`);
+    }
+  }
+  return snapshots;
+}
+
+/**
+ * #5522: after the artifact writers ran, a snapshotted file that is gone or different was replaced. Its
+ * pre-install copy moves into gsd-local-patches/ (next to, never over, an existing backup) and is recorded in
+ * backup-meta.json, so the standard "Local patches detected" report names it as it does on the update path.
+ * The staging dir is always removed. Never throws: bookkeeping must not abort the install.
+ * Returns [{ relPath, backupRel }] for the files kept.
+ */
+function backUpReplacedBaselineFiles(configDir, snapshots) {
+  const replaced = [];
+  const patchesDir = path.join(configDir, PATCHES_DIR_NAME);
+  for (const [relPath, snap] of snapshots) {
+    let current = null;
+    try { current = fs.readFileSync(snap.fullPath); } catch { current = null; }
+    if (current !== null && current.equals(snap.content)) continue;
+    try {
+      let backupRel = relPath;
+      if (fs.existsSync(path.join(patchesDir, backupRel))) backupRel = `${relPath}.first-install`;
+      const backupRef = resolveInstallRelativePath(patchesDir, backupRel);
+      if (!backupRef) throw new Error('backup path escapes the config dir');
+      fs.mkdirSync(path.dirname(backupRef.fullPath), { recursive: true });
+      fs.writeFileSync(backupRef.fullPath, snap.content);
+      replaced.push({ relPath, backupRel });
+    } catch (err) {
+      console.warn(`  ${yellow}⚠${reset}  Could not back up ${relPath} to ${PATCHES_DIR_NAME}/ (${err.message}); the original is kept in ${BASELINE_SNAPSHOT_DIR}/`);
+      return replaced;
+    }
+  }
+  if (replaced.length > 0) {
+    try {
+      const metaPath = path.join(patchesDir, 'backup-meta.json');
+      let meta = {};
+      try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) || {}; } catch { meta = {}; }
+      const files = Array.from(new Set([...(Array.isArray(meta.files) ? meta.files : []), ...replaced.map((r) => r.backupRel)]));
+      fs.writeFileSync(metaPath, JSON.stringify({
+        ...meta,
+        backed_up_at: new Date().toISOString(),
+        from_version: meta.from_version ?? null,
+        files,
+        pristine_hashes: { ...(meta.pristine_hashes || {}) },
+      }, null, 2));
+    } catch (err) {
+      console.warn(`  ${yellow}⚠${reset}  Could not record ${PATCHES_DIR_NAME}/backup-meta.json (${err.message}); your copies are in ${PATCHES_DIR_NAME}/`);
+    }
+  }
+  try { fs.rmSync(path.join(configDir, BASELINE_SNAPSHOT_DIR), { recursive: true, force: true }); } catch { /* leftover is harmless */ }
+  return replaced;
+}
+
+/** relPaths in the snapshot whose name is a shipped skill/command the writers will lay down (#5522). */
+function predictShippedNameReplacements(snapshots, skillsManifest) {
+  const out = [];
+  for (const relPath of snapshots.keys()) {
+    const m = /^skills\/gsd-([^/]+)\//.exec(relPath) || /^commands?\/gsd\/([^/]+?)\.md$/.exec(relPath);
+    if (m && skillsManifest.has(m[1])) out.push(relPath);
+  }
+  return out;
+}
+
+/** A copy of the migration result without the baseline-preserve rows for paths the install replaced (#5522). */
+function withoutReplacedBaselineFiles(migrationResult, replaced) {
+  if (!replaced || replaced.length === 0 || !migrationResult || !migrationResult.plan) return migrationResult;
+  const norm = (p) => String(p).replace(/\\/g, '/').replace(/^\/+/, '');
+  const gone = new Set(replaced.map((r) => norm(r.relPath)));
+  const actions = (migrationResult.plan.actions || []).filter((a) => !(a && a.type === 'baseline-preserve-user' && gone.has(norm(a.relPath))));
+  return { ...migrationResult, plan: { ...migrationResult.plan, actions } };
 }
 
 function reportInstallerMigrationResult(result) {
@@ -11073,8 +11182,9 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   const _isCoreProfileAlias = _activeProfileName === 'core';
   const _effectiveInstallMode = _isCoreProfileAlias ? 'minimal' : 'full';
   // Load the manifest and compute resolved profile for named profiles.
-  // For --minimal/core: use an empty manifest (core profile has no transitive
-  // deps) to produce a resolvedProfile with the core skill set.  For core/
+  // For --minimal/core: use an empty manifest for the SKILL closure (core profile has no
+  // transitive skill deps) to produce a resolvedProfile with the core skill set; agents
+  // come from the full manifest (#5503, see below).  For core/
   // standard profiles, resolveProfile's `registry` arg IS consulted (via
   // _capabilitySkillsForMode) so tier:core/tier:standard capability skills are
   // unioned in when registered. #2322 correction: for the DEFAULT `full`
@@ -11087,10 +11197,15 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // is passed so an INSTALLED third-party capability (not just a first-party
   // one) is honored on every profile, `full` included (#2322 blocker 2).
   const _commandsDir = path.join(src, 'commands', 'gsd');
-  const _skillsManifest = _isCoreProfileAlias ? new Map() : loadSkillsManifest(_commandsDir);
+  // #5503: the empty manifest only keeps core's SKILL set at the eight core skills (no
+  // `requires:` closure). The agents those skills spawn are still derived from the real
+  // manifest, so a core install can run /gsd-plan-phase and friends.
+  const _fullSkillsManifest = loadSkillsManifest(_commandsDir);
+  const _skillsManifest = _isCoreProfileAlias ? new Map() : _fullSkillsManifest;
   let _resolvedProfile = resolveProfile({
     modes: [_activeProfileName],
     manifest: _skillsManifest,
+    agentManifest: _fullSkillsManifest,
     registry: _installedCapabilityRegistry,
   });
   // Unified staging function: all profiles use stageSkillsForProfile with the
@@ -11099,9 +11214,13 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     return stageSkillsForProfile(commandsGsdDir, _resolvedProfile);
   }
   function _stageAgents(agentsDir) {
-    if (_isCoreProfileAlias) return agentsDir;
+    // #5503: no core-alias shortcut — Codex gets the same profile-filtered agents as every runtime.
     return stageAgentsForProfile(agentsDir, _resolvedProfile);
   }
+  // #5503: Codex registers agent roles in config.toml. That used to be gated on "minimal mode"
+  // because minimal staged no agents; gate it on whether the resolved profile stages any.
+  const _codexAgentRolesEnabled = () =>
+    !isMinimalMode(_effectiveInstallMode) || (_resolvedProfile.agents instanceof Set && _resolvedProfile.agents.size > 0);
   const persistActiveProfileMarker = () => {
     try {
       writeActiveProfile(targetDir, _activeProfileName);
@@ -11476,7 +11595,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // The full restoreCodexSnapshot() (defined inside the config block) additionally
   // handles config.toml and the staged hooks/ tree, which are not yet touched
   // at this point in the pipeline.
-  const _codexPreConfigRollback = !hostBehaviorsFor(runtime).tomlConfigInstall || isMinimalMode(_effectiveInstallMode) ? null : () => {
+  const _codexPreConfigRollback = !hostBehaviorsFor(runtime).tomlConfigInstall || !_codexAgentRolesEnabled() ? null : () => {
     rollbackInstallerMigrations();
     // skills/gsd-* — pass 1: restore snapshot entries (may be absent if deleted mid-install).
     const _earlySkillsDir = _resolveSkillsRootDir(runtime, targetDir, _installScopeId);
@@ -11578,6 +11697,8 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // scope (outside the try block below) so it is accessible in the settings section later.
   // Absent VERSION = fresh install; present VERSION = upgrade/re-install.
   const priorInstallExisted = fs.existsSync(path.join(targetDir, 'gsd-core', 'VERSION'));
+  // #5522: files the first-time baseline reported as preserved, snapshotted before the artifact writers run.
+  let baselinePreservedSnapshots = new Map();
   try {
   installerMigrationResult = runInstallerMigrations({
     configDir: targetDir,
@@ -11631,8 +11752,18 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
       };
     }
   }
-  reportInstallerMigrationResult(installerMigrationResult);
+  if (Array.isArray(installerMigrationResult.blocked) && installerMigrationResult.blocked.length > 0) {
+    reportInstallerMigrationResult(installerMigrationResult); // show what blocked before the assertion throws
+  }
   assertInstallerMigrationsUnblocked(installerMigrationResult);
+  baselinePreservedSnapshots = snapshotBaselinePreservedFiles(targetDir, installerMigrationResult);
+  // #5522: the migration report stays ahead of materialization, but a baseline-preserved file the skills
+  // writer is about to replace (its name is a shipped skill's) is not listed as preserved; the
+  // replacement is reported once the writers have run.
+  reportInstallerMigrationResult(withoutReplacedBaselineFiles(
+    installerMigrationResult,
+    predictShippedNameReplacements(baselinePreservedSnapshots, _fullSkillsManifest).map((relPath) => ({ relPath }))
+  ));
 
   // Artifact install dispatcher — routes to layout-driven path for all
   // skills-based runtimes (both full and minimal/core profiles); keeps
@@ -12206,7 +12337,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // advertising the old full agent surface even though the descriptor-driven
   // write above already skipped writing the .md files for a minimal-tier
   // resolvedProfile. Reuse the same helper that powers `--uninstall`.
-  if (isMinimalMode(_effectiveInstallMode) && hostBehaviorsFor(runtime).tomlConfigInstall) {
+  if (!_codexAgentRolesEnabled() && hostBehaviorsFor(runtime).tomlConfigInstall) {
     const codexConfigPath = path.join(targetDir, 'config.toml');
     if (fs.existsSync(codexConfigPath)) {
       const existing = fs.readFileSync(codexConfigPath, 'utf8');
@@ -12615,6 +12746,13 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     }
   }
 
+  // #5522: keep the user's copy of any baseline-preserved file the writers replaced (the update path's
+  // gsd-local-patches/ backup), then report the migrations with those paths no longer listed as preserved.
+  const replacedBaselineFiles = backUpReplacedBaselineFiles(targetDir, baselinePreservedSnapshots);
+  for (const { relPath, backupRel } of replacedBaselineFiles) {
+    console.log(`  ${yellow}i${reset}  ${relPath} was replaced by the install (it has the name of a shipped GSD file) — your copy is backed up to ${PATCHES_DIR_NAME}/${backupRel}`);
+  }
+
   if (failures.length > 0) {
     console.error(`\n  ${yellow}Installation incomplete!${reset} Failed: ${failures.join(', ')}`);
     process.exit(1);
@@ -12820,9 +12958,10 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // #2695: this branch runs for BOTH `core` (minimal) and `full` profiles.
   // Hooks are lightweight infrastructure (update-check + context monitor), not the
   // "full agent surface" that `core` deliberately omits. The config.toml / agent
-  // generation below is still gated by its own inner `!isMinimalMode` guard, so
-  // `core` enters the branch to receive the hook-file copy + hooks.json wiring but
-  // does NOT get agent roles generated. Before #2695 the outer `!isMinimalMode`
+  // generation below is gated by its own inner `_codexAgentRolesEnabled()` guard (#5503:
+  // it used to be `!isMinimalMode`, which kept `core` from registering the agents its
+  // skills spawn), so `core` enters the branch to receive the hook-file copy + hooks.json
+  // wiring AND the agent roles its own skills spawn. Before #2695 the outer `!isMinimalMode`
   // here skipped the whole branch for `core`, so the registered parent hook pointed
   // at a worker/registry the same installer never delivered.
   if (plan.installSurface === 'codex-toml') {
@@ -12993,7 +13132,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     };
 
     let agentCount = 0;
-    if (!isMinimalMode(_effectiveInstallMode)) {
+    if (_codexAgentRolesEnabled()) {
       // #2834: write ~/.gsd/defaults.json (resolve_model_ids + runtime) BEFORE generating
       // agent TOMLs — installCodexConfig reads defaults.json at generation time, so on a
       // clean first install the runtime-aware model resolver must already know the runtime.
@@ -13012,7 +13151,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
       // not include agents/gsd-*.toml because those files did not yet exist.
       writeManifest(targetDir, runtime, { mode: _effectiveInstallMode, scope: _installScopeId });
     } else {
-      console.log(`  ${dim}↳${reset} Skipping Codex agent config generation (minimal install)`);
+      console.log(`  ${dim}↳${reset} Skipping Codex agent config generation (${_resolvedProfile.name} profile stages no agents)`);
     }
 
     // Copy only the hook files that Codex actually registers via its hook configuration (#2153).
