@@ -18,7 +18,6 @@ const { gitOrThrow, throwIfFailed } = require('./helpers/git-fixture.cjs');
 const { runGsdTools, createTempProject, createTempGitProject, cleanup, readFileNormalized } = require('./helpers.cjs');
 const { writeState } = require('./fixtures/index.cjs');
 const { scanFencedBlocks } = require('../gsd-core/bin/lib/markdown-sectionizer.cjs');
-const { ERROR_REASON } = require('../gsd-core/bin/lib/io.cjs');
 
 /** Return the raw text of every ```bash fenced block in `content`. */
 function extractBashBlocks(content) {
@@ -185,11 +184,12 @@ describe('phases clear: uncommitted-changes guard (#1447)', () => {
     fs.writeFileSync(path.join(phase1, 'PLAN.md'), '# Plan (uncommitted)');
     // Do NOT commit — leave as untracked/uncommitted changes
 
-    const result = runGsdTools(['--json-errors', 'phases', 'clear', '--confirm'], tmpDir);
+    const result = runGsdTools('phases clear --confirm', tmpDir);
     assert.ok(!result.success, 'phases clear should fail when uncommitted changes exist');
-    const envelope = JSON.parse(result.error);
-    assert.strictEqual(envelope.ok, false);
-    assert.strictEqual(envelope.reason, ERROR_REASON.PHASES_CLEAR_UNCOMMITTED_CHANGES);
+    assert.ok(
+      result.error.includes('uncommitted') || result.error.includes('aborted'),
+      `expected error about uncommitted changes, got: ${result.error}`
+    );
     // Phase directory must still exist (left in place, not archived)
     assert.ok(fs.existsSync(phase1), 'phase directory must survive when guard fires');
   });
@@ -202,11 +202,12 @@ describe('phases clear: uncommitted-changes guard (#1447)', () => {
     // Stage the file but do not commit
     gitOrThrow(['add', '.planning/phases/'], { cwd: tmpDir });
 
-    const result = runGsdTools(['--json-errors', 'phases', 'clear', '--confirm'], tmpDir);
+    const result = runGsdTools('phases clear --confirm', tmpDir);
     assert.ok(!result.success, 'phases clear should fail when staged-but-uncommitted changes exist');
-    const envelope = JSON.parse(result.error);
-    assert.strictEqual(envelope.ok, false);
-    assert.strictEqual(envelope.reason, ERROR_REASON.PHASES_CLEAR_UNCOMMITTED_CHANGES);
+    assert.ok(
+      result.error.includes('uncommitted') || result.error.includes('aborted'),
+      `expected error about uncommitted changes, got: ${result.error}`
+    );
     assert.ok(fs.existsSync(phase1), 'phase directory must survive when guard fires');
   });
 
@@ -229,82 +230,6 @@ describe('phases clear: uncommitted-changes guard (#1447)', () => {
       fs.existsSync(path.join(archive, '01-foundation', 'PLAN.md')),
       'the uncommitted file must survive inside the archive',
     );
-  });
-
-  // ─── #5270: the two refusals carry a typed reason ────────────────────────
-
-  test('#5270 the --confirm gate refuses with PHASES_CLEAR_CONFIRM_REQUIRED and leaves the disk untouched', () => {
-    const phasesDir = path.join(tmpDir, '.planning', 'phases');
-    const phase1 = path.join(phasesDir, '01-foundation');
-    fs.mkdirSync(phase1, { recursive: true });
-    fs.writeFileSync(path.join(phase1, 'PLAN.md'), '# Plan\n');
-    gitOrThrow(['add', '.planning/phases/'], { cwd: tmpDir });
-    gitOrThrow(['commit', '-m', 'add phase'], { cwd: tmpDir });
-
-    const result = runGsdTools(['--json-errors', 'phases', 'clear'], tmpDir);
-    assert.ok(!result.success, 'phases clear without --confirm must refuse');
-    const envelope = JSON.parse(result.error);
-    assert.strictEqual(envelope.ok, false);
-    assert.strictEqual(envelope.reason, ERROR_REASON.PHASES_CLEAR_CONFIRM_REQUIRED);
-    assert.strictEqual(envelope.phase_dirs, 1);
-    assert.strictEqual(envelope.archive_root, '.planning/milestones');
-    assert.ok(fs.existsSync(path.join(phase1, 'PLAN.md')), 'the refusal must leave the phase directory in place');
-    assert.strictEqual(findPhasesArchive(tmpDir), null, 'the refusal must not create an archive');
-  });
-
-  test('#5270 the --confirm gate counts every phase directory it would archive', () => {
-    const phasesDir = path.join(tmpDir, '.planning', 'phases');
-    for (const name of ['01-foundation', '02-api']) {
-      const dir = path.join(phasesDir, name);
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, 'PLAN.md'), '# Plan\n');
-    }
-    gitOrThrow(['add', '.planning/phases/'], { cwd: tmpDir });
-    gitOrThrow(['commit', '-m', 'add phases'], { cwd: tmpDir });
-
-    const result = runGsdTools(['--json-errors', 'phases', 'clear'], tmpDir);
-    assert.ok(!result.success, 'phases clear without --confirm must refuse');
-    const envelope = JSON.parse(result.error);
-    assert.strictEqual(envelope.reason, ERROR_REASON.PHASES_CLEAR_CONFIRM_REQUIRED);
-    assert.strictEqual(envelope.phase_dirs, 2);
-    for (const name of ['01-foundation', '02-api']) {
-      assert.ok(fs.existsSync(path.join(phasesDir, name, 'PLAN.md')), `the refusal must leave ${name} in place`);
-    }
-    assert.strictEqual(findPhasesArchive(tmpDir), null, 'the refusal must not create an archive');
-  });
-
-  test('#5270 the uncommitted-changes guard refuses with PHASES_CLEAR_UNCOMMITTED_CHANGES and leaves the disk untouched', () => {
-    const phasesDir = path.join(tmpDir, '.planning', 'phases');
-    const phase1 = path.join(phasesDir, '01-foundation');
-    fs.mkdirSync(phase1, { recursive: true });
-    fs.writeFileSync(path.join(phase1, 'PLAN.md'), '# Plan (uncommitted)\n');
-    // Do NOT commit — the guard fires.
-
-    const result = runGsdTools(['--json-errors', 'phases', 'clear', '--confirm'], tmpDir);
-    assert.ok(!result.success, 'phases clear must abort on uncommitted phase work');
-    const envelope = JSON.parse(result.error);
-    assert.strictEqual(envelope.ok, false);
-    assert.strictEqual(envelope.reason, ERROR_REASON.PHASES_CLEAR_UNCOMMITTED_CHANGES);
-    assert.strictEqual(envelope.uncommitted_changes, 1);
-    assert.strictEqual(envelope.archive_root, '.planning/milestones');
-    assert.ok(fs.existsSync(path.join(phase1, 'PLAN.md')), 'the refusal must leave the phase directory in place');
-    assert.strictEqual(findPhasesArchive(tmpDir), null, 'the refusal must not create an archive');
-  });
-
-  test('#5270 under a workstream the refusal reports the workstream archive root', () => {
-    const wsRoot = path.join(tmpDir, '.planning', 'workstreams', 'alpha');
-    const phase1 = path.join(wsRoot, 'phases', '01-foundation');
-    fs.mkdirSync(phase1, { recursive: true });
-    fs.writeFileSync(path.join(phase1, 'PLAN.md'), '# Plan\n');
-    gitOrThrow(['add', '.planning/'], { cwd: tmpDir });
-    gitOrThrow(['commit', '-m', 'add workstream phase'], { cwd: tmpDir });
-
-    const result = runGsdTools(['--json-errors', 'phases', 'clear'], tmpDir, { GSD_WORKSTREAM: 'alpha' });
-    assert.ok(!result.success, 'phases clear without --confirm must refuse');
-    const envelope = JSON.parse(result.error);
-    assert.strictEqual(envelope.reason, ERROR_REASON.PHASES_CLEAR_CONFIRM_REQUIRED);
-    assert.strictEqual(envelope.archive_root, '.planning/workstreams/alpha/milestones');
-    assert.ok(fs.existsSync(path.join(phase1, 'PLAN.md')), 'the refusal must leave the phase directory in place');
   });
 
   test('succeeds without --force when all phase files are committed', () => {

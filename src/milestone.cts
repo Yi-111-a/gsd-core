@@ -27,7 +27,7 @@ import auditMod = require('./audit.cjs');
 const { resolveQuickTaskSummaryFile } = auditMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import ioMod = require('./io.cjs');
-const { output, error, ERROR_REASON } = ioMod;
+const { output, error } = ioMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import cliExitMod = require('./cli-exit.cjs');
 const { ExitError } = cliExitMod;
@@ -1370,8 +1370,6 @@ function cmdPhasesClear(cwd: string, raw: boolean, args: string[]): void {
       error(
         `phases clear would archive ${dirs.length} phase director${dirs.length === 1 ? 'y' : 'ies'} to ` +
           `${archiveDestDisplay}. Pass --confirm to proceed.`,
-        ERROR_REASON.PHASES_CLEAR_CONFIRM_REQUIRED,
-        { phase_dirs: dirs.length, archive_root: archiveRootRel },
       );
     }
 
@@ -1412,8 +1410,6 @@ function cmdPhasesClear(cwd: string, raw: boolean, args: string[]): void {
             `Archive or commit outgoing phase work before running this command, ` +
             `or pass --force to skip this check; the directories, uncommitted changes included, ` +
             `are archived under ${archiveDestDisplay}. (#1447, #1871)`,
-          ERROR_REASON.PHASES_CLEAR_UNCOMMITTED_CHANGES,
-          { uncommitted_changes: uncommittedLines.length, archive_root: archiveRootRel },
         );
       }
     }

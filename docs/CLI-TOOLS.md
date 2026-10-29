@@ -224,13 +224,6 @@ canonical sentinel predicate `phases list` uses, and stay in
 `.planning/phases/`. `--force` only skips the uncommitted-changes guard; it
 never deletes.
 
-The two refusals carry a typed reason under `--json-errors`:
-`phases_clear_confirm_required` (no `--confirm`; the envelope adds
-`phase_dirs` and `archive_root`) and `phases_clear_uncommitted_changes`
-(the #1447 guard; the envelope adds `uncommitted_changes` and
-`archive_root`). `archive_root` is the archive directory relative to the
-working directory, for example `.planning/milestones`.
-
 ### `find-phase` plan/summary counts (live vs physical)
 
 `find-phase`'s JSON carries the existing `plans[]` / `summaries[]` arrays
